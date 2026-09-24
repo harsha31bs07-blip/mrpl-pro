@@ -22,7 +22,8 @@ if(SAMAYA_BUILD_CLI)
   set_tests_properties(cli_stats PROPERTIES PASS_REGULAR_EXPRESSION "rows 2 .*cols 2")
   add_test(NAME cli_json COMMAND samaya_cli --json --log-level 0
     ${CMAKE_CURRENT_SOURCE_DIR}/instances/tiny_lp.mps)
-  set_tests_properties(cli_json PROPERTIES PASS_REGULAR_EXPRESSION "\"status\":\"not_implemented\"")
+  set_tests_properties(cli_json PROPERTIES PASS_REGULAR_EXPRESSION
+    "\"status\":\"optimal\",\"verified\":true,\"objective\":11[,.]")
   add_test(NAME cli_missing_file COMMAND samaya_cli /nonexistent.mps)
   set_tests_properties(cli_missing_file PROPERTIES WILL_FAIL TRUE)
 endif()

@@ -37,7 +37,8 @@ TEST(model_validate_rejects_bad_models) {
   m = two_by_two();
   m.col_lower[0] = 2.0;
   m.col_upper[0] = 1.0;
-  CHECK(!m.validate().empty());
+  CHECK(m.validate().empty());  // Crossed bounds are infeasible, not invalid.
+  CHECK(m.crossed_bounds().find("column 0") != std::string::npos);
 
   m = two_by_two();
   m.row_lower[1] = kInf;
@@ -92,8 +93,8 @@ TEST(c_api_round_trip) {
   CHECK_EQ(samaya_model_num_cols(model), 2);
   CHECK_EQ(samaya_model_num_nonzeros(model), 4LL);
   double objective = 0.0;
-  CHECK_EQ(samaya_solve(model, &objective), static_cast<int>(SAMAYA_NOT_IMPLEMENTED));
-  CHECK(std::isnan(objective));
+  CHECK_EQ(samaya_solve(model, &objective), static_cast<int>(SAMAYA_OPTIMAL));
+  CHECK_NEAR(objective, 11.0, 1e-9);
   samaya_model_free(model);
 
   char err[128];
@@ -103,4 +104,49 @@ TEST(c_api_round_trip) {
   CHECK(std::string(err).find("cannot open") != std::string::npos);
   CHECK_EQ(std::string(samaya_status_string(SAMAYA_OPTIMAL)), "optimal");
   CHECK_EQ(std::string(samaya_version()), std::string(samaya::version()));
+}
+
+TEST(solver_solves_and_verifies_lp_outcomes) {
+  samaya::Params params;
+  params.log_level = 0;
+  const samaya::Solver solver(params);
+
+  const Model lp = samaya::read_mps(std::string(SAMAYA_TEST_DATA_DIR) + "/tiny_lp.mps");
+  samaya::Result r = solver.solve(lp);
+  REQUIRE(r.status == samaya::Status::kOptimal);
+  CHECK(r.verified);
+  CHECK_NEAR(r.objective, 11.0, 1e-9);
+  CHECK_EQ(r.dual_bound, r.objective);
+  CHECK_EQ(r.col_value.size(), 2u);
+  CHECK_EQ(r.row_dual.size(), 2u);
+  CHECK(r.simplex_iterations > 0);
+  CHECK(r.max_primal_violation <= 1e-9);
+
+  Model crossed = lp;
+  crossed.row_lower[0] = 5.0;  // 5 <= x + y <= 4.
+  r = solver.solve(crossed);
+  CHECK(r.status == samaya::Status::kInfeasible);
+  CHECK(r.verified);
+  CHECK(r.message.find("row 0") != std::string::npos);
+
+  Model infeasible = lp;
+  infeasible.row_upper[1] = -1.0;  // x + 3y <= -1 with x, y >= 0.
+  r = solver.solve(infeasible);
+  CHECK(r.status == samaya::Status::kInfeasible);
+  CHECK(r.verified);
+  CHECK(samaya::verify_infeasibility(infeasible, r.infeasibility_certificate).ok);
+
+  Model unbounded = lp;
+  unbounded.row_upper = {kInf, kInf};
+  unbounded.col_upper[0] = kInf;
+  r = solver.solve(unbounded);
+  CHECK(r.status == samaya::Status::kUnbounded);
+  CHECK(r.verified);
+  CHECK(samaya::verify_unbounded_ray(unbounded, r.unbounded_ray).ok);
+  CHECK(std::isnan(r.objective));
+
+  params.verify = false;
+  r = samaya::Solver(params).solve(lp);
+  CHECK(r.status == samaya::Status::kOptimal);
+  CHECK(!r.verified);
 }

@@ -21,8 +21,19 @@ struct Result {
 
   std::vector<double> col_value;     // x
   std::vector<double> row_activity;  // A x
-  std::vector<double> row_dual;      // y (LP/QP only)
+  std::vector<double> row_dual;      // y with c - A'y = reduced costs (LP/QP only)
   std::vector<double> col_dual;      // reduced costs (LP/QP only)
+
+  // Certificates: a Farkas multiplier per row when infeasible, an improving direction when
+  // unbounded.
+  std::vector<double> infeasibility_certificate;
+  std::vector<double> unbounded_ray;
+
+  // Whether the status and solution passed the independent verifier (Params::verify), and the
+  // largest relative violations it measured.
+  bool verified = false;
+  double max_primal_violation = 0.0;
+  double max_dual_violation = 0.0;
 
   double solve_seconds = 0.0;
   long long simplex_iterations = 0;

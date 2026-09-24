@@ -66,6 +66,10 @@ LpResult solve_lp(const Model& model, const LpSolveOptions& options, const Logge
   result.col_dual.assign(static_cast<std::size_t>(n), 0.0);
   model.A.multiply_transpose(result.row_dual, result.col_dual);
   for (Index j = 0; j < n; ++j) result.col_dual[j] = model.obj[j] - result.col_dual[j];
+  // Normalize signed zeros for cleaner output.
+  for (double& value : result.row_dual) value += 0.0;
+  for (double& value : result.col_dual) value += 0.0;
+  for (double& value : result.col_value) value += 0.0;
 
   long double objective = model.obj_offset;
   for (Index j = 0; j < n; ++j) {

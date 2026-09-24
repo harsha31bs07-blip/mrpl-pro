@@ -204,8 +204,12 @@ TEST(mps_errors_report_line_numbers) {
   CHECK_THROWS(read_mps_from_string(
                    "NAME X\nROWS\n N o\nCOLUMNS\n x o 1\nBOUNDS\n SC B x 1\nENDATA\n"),
                ParseError);
-  // Crossed bounds are caught by model validation.
+  // Crossed bounds make a model infeasible, not malformed, so they parse.
+  const Model crossed = read_mps_from_string(
+      "NAME X\nROWS\n N o\nCOLUMNS\n x o 1\nBOUNDS\n LO B x 2\n UP B x 1\nENDATA\n");
+  CHECK(!crossed.crossed_bounds().empty());
+  // Infinite bounds on the wrong side are caught by model validation.
   CHECK_THROWS(read_mps_from_string(
-                   "NAME X\nROWS\n N o\nCOLUMNS\n x o 1\nBOUNDS\n LO B x 2\n UP B x 1\nENDATA\n"),
+                   "NAME X\nROWS\n N o\nCOLUMNS\n x o 1\nBOUNDS\n LO B x 1e30\nENDATA\n"),
                ParseError);
 }
