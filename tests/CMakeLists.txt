@@ -2,9 +2,12 @@ add_executable(samaya_tests
   test_main.cpp
   test_model_and_solver.cpp
   test_mps_reader.cpp
+  test_scaling.cpp
   test_sparse_matrix.cpp
 )
 target_link_libraries(samaya_tests PRIVATE samaya::samaya samaya_options)
+# Tests exercise internal components (factorization, simplex) directly.
+target_include_directories(samaya_tests PRIVATE ${PROJECT_SOURCE_DIR}/src)
 target_compile_definitions(samaya_tests PRIVATE
   SAMAYA_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/instances")
 

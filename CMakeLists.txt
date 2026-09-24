@@ -59,6 +59,7 @@ add_library(samaya
   src/core/status.cpp
   src/core/c_api.cpp
   src/io/mps_reader.cpp
+  src/linalg/scaling.cpp
   src/linalg/sparse_matrix.cpp
 )
 add_library(samaya::samaya ALIAS samaya)
