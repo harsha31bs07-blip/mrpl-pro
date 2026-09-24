@@ -1,0 +1,15 @@
+build/
+out/
+.cache/
+compile_commands.json
+*.o
+*.a
+*.so
+__pycache__/
+*.pyc
+.vscode/
+.idea/
+
+# Benchmark instances are downloaded, never committed.
+bench/instances/
+bench/results/

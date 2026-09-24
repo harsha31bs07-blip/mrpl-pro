@@ -1,0 +1,21 @@
+add_executable(samaya_tests
+  test_main.cpp
+  test_model_and_solver.cpp
+  test_mps_reader.cpp
+  test_sparse_matrix.cpp
+)
+target_link_libraries(samaya_tests PRIVATE samaya::samaya samaya_options)
+target_compile_definitions(samaya_tests PRIVATE
+  SAMAYA_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/instances")
+
+add_test(NAME unit_tests COMMAND samaya_tests)
+
+if(SAMAYA_BUILD_CLI)
+  add_test(NAME cli_stats COMMAND samaya_cli --stats ${CMAKE_CURRENT_SOURCE_DIR}/instances/tiny_lp.mps)
+  set_tests_properties(cli_stats PROPERTIES PASS_REGULAR_EXPRESSION "rows 2 .*cols 2")
+  add_test(NAME cli_json COMMAND samaya_cli --json --log-level 0
+    ${CMAKE_CURRENT_SOURCE_DIR}/instances/tiny_lp.mps)
+  set_tests_properties(cli_json PROPERTIES PASS_REGULAR_EXPRESSION "\"status\":\"not_implemented\"")
+  add_test(NAME cli_missing_file COMMAND samaya_cli /nonexistent.mps)
+  set_tests_properties(cli_missing_file PROPERTIES WILL_FAIL TRUE)
+endif()
