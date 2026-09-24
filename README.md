@@ -10,14 +10,18 @@ for the architecture, algorithms, benchmarks and timeline.
 |---|---|
 | Model, sparse matrix (CSC), model statistics | done |
 | MPS / QPS reader (free + fixed, ranges, all common bound types, integer markers, QUADOBJ/QMATRIX) | done |
-| C++ API, C API, `samaya` CLI (`--stats`, `--json`) | done |
-| Unit tests, CI (GCC + Clang, Debug / Release / ASan+UBSan) | done |
-| Benchmark harness + instance download script | done |
-| Scaling, LU factorization, dual simplex | phase 1 |
-| Presolve, barrier, PDLP (CPU + GPU) | phase 2–3 |
-| Branch-and-cut | phase 4 |
+| C++ API, C API, `samaya` CLI (`--stats`, `--json`, `--solution`) | done |
+| Scaling: geometric mean + equilibration, powers of two | done |
+| Sparse LU: Markowitz + threshold pivoting, Forrest–Tomlin updates | done |
+| Dual simplex: dual steepest edge, bound-flipping Harris ratio test, perturbation, phase 1 | done |
+| Primal simplex (Devex) for cleanup and unboundedness | done |
+| Independent verifier: optimality, Farkas certificates, unbounded rays | done |
+| Presolve, hyper-sparse solves, barrier, PDLP (CPU + GPU) | phase 2–3 |
+| Branch-and-cut (MILP), QP | phase 3–4 |
 
-Until the algorithms land, `solve()` validates the model and returns `not_implemented`.
+LP models are solved by the dual simplex. Every optimal solution, infeasibility certificate and
+unbounded ray is checked by the independent verifier before it is reported; an outcome that does
+not verify becomes `numerical_error`. MILP and QP models return `not_implemented` for now.
 
 ## Build
 
@@ -35,8 +39,10 @@ Presets: `debug` (warnings as errors), `release`, `asan` (AddressSanitizer + UBS
 ## Usage
 
 ```sh
-build/release/apps/cli/samaya --stats model.mps     # sizes and coefficient ranges
-build/release/apps/cli/samaya --json model.mps      # solve, JSON summary on the last line
+build/release/apps/cli/samaya --stats model.mps              # sizes and coefficient ranges
+build/release/apps/cli/samaya model.mps                      # solve and verify
+build/release/apps/cli/samaya --json model.mps               # JSON summary on the last line
+build/release/apps/cli/samaya --solution sol.txt model.mps   # primal/dual values, certificates
 build/release/apps/cli/samaya --help
 ```
 
@@ -55,10 +61,13 @@ C: see [`include/samaya_c.h`](include/samaya_c.h).
 
 ```sh
 bench/fetch_instances.sh netlib miplib              # downloads into bench/instances/
-bench/harness.py bench/instances/netlib --baseline highs --time-limit 300
+bench/generate_lps.py --scale 1                     # transportation, refinery planning, sparse
+bench/harness.py bench/instances/generated --baseline highspy --time-limit 300
 ```
 
-Baseline solvers (for example HiGHS) are run as separate executables for comparison only.
+Baseline solvers (the `highs` executable or the `highspy` Python module) are run only for
+comparison and are never linked into samaya. The harness reports status/objective agreement and
+the shifted geometric mean of solve times.
 
 ## Layout
 
@@ -66,11 +75,13 @@ Baseline solvers (for example HiGHS) are run as separate executables for compari
 include/        public API (samaya.hpp, samaya/*.hpp, samaya_c.h)
 src/core/       model, solver dispatch, status, logging, C API
 src/io/         file readers
-src/linalg/     sparse matrices (LU, Cholesky, AMD to follow)
+src/linalg/     sparse matrices, scaling, basis LU with Forrest–Tomlin updates
+src/lp/         dual and primal simplex, LP driver (scaling, unscaling)
+src/verify/     independent solution and certificate checks
 apps/cli/       samaya command-line tool
-tests/          unit tests (self-contained framework) and small instances
-bench/          benchmark harness and instance download script
+tests/          unit tests (self-contained framework), dense reference solvers, random LP
+                generators, small instances
+bench/          benchmark harness, instance generator and download script
 ```
 
-Later phases add `src/presolve`, `src/lp`, `src/qp`, `src/mip`, `src/gpu` and `src/verify`, as
-described in PLAN.md §3.
+Later phases add `src/presolve`, `src/qp`, `src/mip` and `src/gpu`, as described in PLAN.md §3.
