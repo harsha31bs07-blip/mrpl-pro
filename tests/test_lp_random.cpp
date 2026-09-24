@@ -10,6 +10,7 @@
 #include "lp/lp_solver.hpp"
 #include "lp_generators.hpp"
 #include "reference_lp.hpp"
+#include "samaya/verify.hpp"
 #include "test_framework.hpp"
 
 using samaya::LpResult;
@@ -75,6 +76,20 @@ Tally cross_check(LpFamily family, int count, int max_rows, int max_cols, unsign
       ok = std::fabs(got.objective - ref.objective) <= 1e-6 * (1.0 + std::fabs(ref.objective)) &&
            max_primal_violation(model, got) <= 1e-6;
     }
+    // Every outcome must also pass the independent verifier.
+    std::string verify_message;
+    if (ok) {
+      samaya::VerifyReport report;
+      if (got.status == SimplexStatus::kOptimal) {
+        report = samaya::verify_lp_optimality(model, got.col_value, got.row_dual);
+      } else if (got.status == SimplexStatus::kInfeasible) {
+        report = samaya::verify_infeasibility(model, got.dual_ray);
+      } else {
+        report = samaya::verify_unbounded_ray(model, got.primal_ray);
+      }
+      ok = report.ok;
+      verify_message = report.message;
+    }
     if (got.status == SimplexStatus::kOptimal) {
       tally.work.dual_iterations += got.stats.dual_iterations;
       tally.work.primal_iterations += got.stats.primal_iterations;
@@ -89,11 +104,12 @@ Tally cross_check(LpFamily family, int count, int max_rows, int max_cols, unsign
     if (!ok) {
       ++tally.mismatches;
       std::fprintf(stderr,
-                   "  %s #%d (%dx%d): reference %s %.9g, solver %s %.9g (viol %.2e)\n",
+                   "  %s #%d (%dx%d): reference %s %.9g, solver %s %.9g (viol %.2e) %s\n",
                    samaya::test::to_string(family), k, model.num_rows(), model.num_cols(),
                    to_string(ref.status), ref.objective, samaya::to_string(got.status),
                    got.objective,
-                   got.status == SimplexStatus::kOptimal ? max_primal_violation(model, got) : 0.0);
+                   got.status == SimplexStatus::kOptimal ? max_primal_violation(model, got) : 0.0,
+                   verify_message.c_str());
     }
   }
   std::printf("  %-10s %4d LPs: %d optimal, %d infeasible, %d unbounded, %d mismatches | "

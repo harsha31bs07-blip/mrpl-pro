@@ -64,6 +64,7 @@ add_library(samaya
   src/lp/simplex.cpp
   src/linalg/scaling.cpp
   src/linalg/sparse_matrix.cpp
+  src/verify/verify.cpp
 )
 add_library(samaya::samaya ALIAS samaya)
 target_include_directories(samaya

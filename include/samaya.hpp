@@ -10,3 +10,4 @@
 #include "samaya/sparse_matrix.hpp"
 #include "samaya/status.hpp"
 #include "samaya/types.hpp"
+#include "samaya/verify.hpp"

@@ -7,6 +7,7 @@ add_executable(samaya_tests
   test_mps_reader.cpp
   test_scaling.cpp
   test_sparse_matrix.cpp
+  test_verify.cpp
 )
 target_link_libraries(samaya_tests PRIVATE samaya::samaya samaya_options)
 # Tests exercise internal components (factorization, simplex) directly.
