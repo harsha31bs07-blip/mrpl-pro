@@ -58,7 +58,9 @@ class MpsWriter:
             lines.append(f" {'G' if kind == 'R' else kind} {name}")
         lines.append("COLUMNS")
         for c, entries in self.cols.items():
-            if self.obj[c] != 0.0:
+            # An empty column must still be declared, or a later BOUNDS entry names an unknown
+            # column; an explicit zero objective entry does that.
+            if self.obj[c] != 0.0 or not entries:
                 lines.append(f" {c} obj {self.obj[c]:.12g}")
             for r, v in entries.items():
                 lines.append(f" {c} {r} {v:.12g}")
