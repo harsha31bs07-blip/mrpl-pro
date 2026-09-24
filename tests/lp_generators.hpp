@@ -15,6 +15,7 @@ enum class LpFamily {
   kRandom,      // Independent random bounds: often infeasible.
   kDegenerate,  // Many rows tight at one point, small integer data, many zero costs.
   kLoose,       // Few finite bounds: often unbounded.
+  kBoxed,       // Every column boxed: exercises the bound-flipping ratio test.
 };
 
 inline const char* to_string(LpFamily f) {
@@ -23,6 +24,7 @@ inline const char* to_string(LpFamily f) {
     case LpFamily::kRandom: return "random";
     case LpFamily::kDegenerate: return "degenerate";
     case LpFamily::kLoose: return "loose";
+    case LpFamily::kBoxed: return "boxed";
   }
   return "?";
 }
@@ -67,7 +69,10 @@ inline Model random_lp(LpFamily family, int max_rows, int max_cols, std::mt19937
     const double r = std::uniform_real_distribution<double>(0.0, 1.0)(rng);
     const int a = uniform_int(-5, 5);
     const int b = a + uniform_int(0, 6);
-    if (r < free_chance) {
+    if (family == LpFamily::kBoxed) {
+      lo = a;
+      up = a + uniform_int(1, 20);
+    } else if (r < free_chance) {
       // Free.
     } else if (r < 0.45) {
       lo = family == LpFamily::kLoose ? a : 0;

@@ -94,6 +94,7 @@ Tally cross_check(LpFamily family, int count, int max_rows, int max_cols, unsign
       tally.work.dual_iterations += got.stats.dual_iterations;
       tally.work.primal_iterations += got.stats.primal_iterations;
       tally.work.cost_shifts += got.stats.cost_shifts;
+      tally.work.bound_flips += got.stats.bound_flips;
       tally.work.rebuilds_on_mismatch += got.stats.rebuilds_on_mismatch;
     }
     switch (ref.status) {
@@ -145,6 +146,16 @@ TEST(lp_random_default_options) {
   CHECK(unbounded > 50);
 }
 
+TEST(lp_random_boxed_models_use_bound_flips) {
+  const LpSolveOptions options;
+  const Tally small = cross_check(LpFamily::kBoxed, 300, 8, 8, 5000, options);
+  CHECK_EQ(small.mismatches, 0);
+  const Tally large = cross_check(LpFamily::kBoxed, 60, 30, 30, 5001, options);
+  CHECK_EQ(large.mismatches, 0);
+  CHECK(small.work.bound_flips + large.work.bound_flips > 100);
+  CHECK(small.optimal + large.optimal > 100);
+}
+
 TEST(lp_random_larger_models) {
   const LpSolveOptions options;
   for (LpFamily f : {LpFamily::kFeasible, LpFamily::kDegenerate}) {
@@ -168,6 +179,45 @@ TEST(lp_random_frequent_refactorization) {
   for (LpFamily f : {LpFamily::kFeasible, LpFamily::kRandom, LpFamily::kDegenerate}) {
     CHECK_EQ(cross_check(f, 100, 20, 20, 4000 + static_cast<unsigned>(f), options).mismatches, 0);
   }
+}
+
+TEST(lp_dual_steepest_edge_weights_stay_accurate_on_long_runs) {
+  // Solve each model once to learn its iteration count, then stop a second run three quarters of
+  // the way and compare the updated weights with exact ones.
+  std::mt19937 rng(91);
+  const samaya::Logger quiet(0);
+  int compared = 0;
+  double worst = 0.0;
+  for (int k = 0; k < 16; ++k) {
+    const Model model = samaya::test::random_lp(LpFamily::kBoxed, 150, 200, rng);
+    samaya::LpProblem lp;
+    lp.m = model.num_rows();
+    lp.n = model.num_cols();
+    lp.A = model.A;
+    lp.At = model.A.transpose();
+    lp.cost = model.obj;
+    lp.cost.resize(static_cast<std::size_t>(lp.n + lp.m), 0.0);
+    lp.lower = model.col_lower;
+    lp.upper = model.col_upper;
+    lp.lower.insert(lp.lower.end(), model.row_lower.begin(), model.row_lower.end());
+    lp.upper.insert(lp.upper.end(), model.row_upper.begin(), model.row_upper.end());
+    samaya::SimplexOptions options;
+    samaya::Simplex full(lp, options, quiet);
+    full.solve();
+    if (full.iterations() < 40 || full.stats().primal_iterations > 0) continue;
+    options.max_iterations = full.iterations() * 3 / 4;
+    samaya::Simplex simplex(lp, options, quiet);
+    if (simplex.solve() != SimplexStatus::kIterationLimit) continue;
+    const std::vector<double> exact = simplex.exact_dse_weights();
+    for (std::size_t r = 0; r < exact.size(); ++r) {
+      if (exact[r] < 1e-3) continue;
+      ++compared;
+      worst = std::max(worst, std::fabs(simplex.dse_weights()[r] - exact[r]) / exact[r]);
+    }
+  }
+  std::printf("  compared %d weights, worst relative error %.2e\n", compared, worst);
+  CHECK(compared > 300);
+  CHECK(worst < 1e-6);
 }
 
 TEST(lp_dual_steepest_edge_weights_stay_exact) {
@@ -207,4 +257,35 @@ TEST(lp_dual_steepest_edge_weights_stay_exact) {
   }
   CHECK(compared > 500);
   CHECK_EQ(wrong, 0);
+}
+
+TEST(lp_random_large_models_verify_first_time) {
+  // Larger sparse models where steepest-edge weight drift once produced false optima. The dense
+  // reference is too slow at this size, so the verifier is the oracle: every outcome must be
+  // proven on the first attempt.
+  std::mt19937 rng(606);
+  const samaya::Logger quiet(0);
+  int proven = 0;
+  for (int k = 0; k < 12; ++k) {
+    const LpFamily family = k % 2 == 0 ? LpFamily::kBoxed : LpFamily::kFeasible;
+    const Model model = samaya::test::random_lp(family, 150, 220, rng);
+    const LpResult got = samaya::solve_lp(model, LpSolveOptions{}, quiet);
+    samaya::VerifyReport report;
+    if (got.status == SimplexStatus::kOptimal) {
+      report = samaya::verify_lp_optimality(model, got.col_value, got.row_dual);
+    } else if (got.status == SimplexStatus::kInfeasible) {
+      report = samaya::verify_infeasibility(model, got.dual_ray);
+    } else if (got.status == SimplexStatus::kUnbounded) {
+      report = samaya::verify_unbounded_ray(model, got.primal_ray);
+    } else {
+      report.ok = false;
+      report.message = samaya::to_string(got.status);
+    }
+    if (!report.ok) {
+      std::fprintf(stderr, "  large #%d (%dx%d) %s: %s\n", k, model.num_rows(), model.num_cols(),
+                   samaya::to_string(got.status), report.message.c_str());
+    }
+    proven += report.ok ? 1 : 0;
+  }
+  CHECK_EQ(proven, 12);
 }

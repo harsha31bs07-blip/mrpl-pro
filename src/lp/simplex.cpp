@@ -22,6 +22,7 @@ namespace {
 constexpr double kMinDseWeight = 1e-4;
 constexpr double kPhase1FreeBound = 1000.0;
 constexpr double kPerturbationBase = 5e-7;
+constexpr double kFeasibilityCostBase = 1e-3;
 // Relative disagreement between the pivot element computed from the column (ftran) and the row
 // (btran) that triggers a refactorization.
 constexpr double kPivotConsistencyTol = 1e-7;
@@ -55,7 +56,9 @@ Simplex::Simplex(const LpProblem& lp, const SimplexOptions& options, const Logge
   y_.assign(m, 0.0);
   d_.assign(nt, 0.0);
   dse_weight_.assign(m, 1.0);
+  devex_weight_.assign(nt, 1.0);
   alpha_row_.assign(nt, 0.0);
+  in_row_nz_.assign(nt, 0);
   alpha_col_.assign(m, 0.0);
 }
 
@@ -152,14 +155,28 @@ void Simplex::compute_dual() {
 }
 
 void Simplex::compute_pivot_row() {
-  std::fill(alpha_row_.begin(), alpha_row_.end(), 0.0);
+  // alpha_row = rho' [A -I], accumulated row-wise so only rows with rho_i != 0 are touched.
+  for (const Index j : row_nz_) {
+    alpha_row_[j] = 0.0;
+    in_row_nz_[j] = 0;
+  }
+  row_nz_.clear();
   const auto start = lp_.At.col_start();
   const auto index = lp_.At.row_index();
   const auto value = lp_.At.values();
   for (Index i = 0; i < m_; ++i) {
     const double r = rho_[i];
     if (r == 0.0) continue;
-    for (NnzIndex p = start[i]; p < start[i + 1]; ++p) alpha_row_[index[p]] += r * value[p];
+    for (NnzIndex p = start[i]; p < start[i + 1]; ++p) {
+      const Index j = index[p];
+      if (!in_row_nz_[j]) {
+        in_row_nz_[j] = 1;
+        row_nz_.push_back(j);
+      }
+      alpha_row_[j] += r * value[p];
+    }
+    in_row_nz_[n_ + i] = 1;
+    row_nz_.push_back(n_ + i);
     alpha_row_[n_ + i] = -r;
   }
 }
@@ -211,13 +228,13 @@ bool Simplex::correct_dual_infeasibilities() {
   return changed;
 }
 
-void Simplex::perturb_costs() {
+void Simplex::perturb_costs(double base) {
   std::uniform_real_distribution<double> unit(0.0, 1.0);
   for (Index j = 0; j < nt_; ++j) {
     const bool has_lower = lower_[j] > -kInf;
     const bool has_upper = upper_[j] < kInf;
     if (lower_[j] == upper_[j] || (!has_lower && !has_upper)) continue;
-    const double xi = kPerturbationBase * (1.0 + std::fabs(cost_[j])) * (1.0 + unit(rng_));
+    const double xi = base * (1.0 + std::fabs(cost_[j])) * (1.0 + unit(rng_));
     switch (status_[j]) {
       case VarStatus::kAtLower: cost_[j] += xi; break;
       case VarStatus::kAtUpper: cost_[j] -= xi; break;
@@ -301,7 +318,9 @@ Index Simplex::choose_leaving_row() const {
     } else {
       continue;
     }
-    const double score = infeasibility * infeasibility / dse_weight_[k];
+    // A non-finite weight would hide the row from pricing forever.
+    const double w = std::isfinite(dse_weight_[k]) ? dse_weight_[k] : 1.0;
+    const double score = infeasibility * infeasibility / w;
     if (score > best_score) {
       best_score = score;
       best = k;
@@ -310,39 +329,84 @@ Index Simplex::choose_leaving_row() const {
   return best;
 }
 
-Index Simplex::dual_ratio_test(double direction) const {
+Index Simplex::dual_ratio_test(double direction, double slope) {
   // Along the dual step t >= 0, d_j(t) = d_j - t * a_j with a_j = direction * alpha_rj.
+  //
+  // Bound-flipping ("long step") ratio test: passing the breakpoint of a boxed variable only
+  // requires flipping it to its other bound, which lowers the slope of the dual objective (the
+  // primal infeasibility of the leaving row) by |a_j| * (u_j - l_j). Breakpoints are passed in
+  // Harris groups while the slope stays positive; the entering variable is the largest pivot of
+  // the group where it would turn non-positive or a variable cannot be flipped.
   const double tol = options_.dual_tol;
   const double pivot_tol = options_.pivot_tol;
-  const auto is_candidate = [&](Index j, double a) {
+  flips_.clear();
+  candidates_.clear();
+  for (const Index j : row_nz_) {
     const VarStatus st = status_[j];
-    if (st == VarStatus::kBasic || lower_[j] == upper_[j] || std::fabs(a) < pivot_tol) return false;
-    if (a > 0.0) return st == VarStatus::kAtLower || st == VarStatus::kAtZero;
-    return st == VarStatus::kAtUpper || st == VarStatus::kAtZero;
-  };
-
-  // Pass 1: largest step keeping every d_j feasible within the tolerance.
-  double max_step = kInf;
-  for (Index j = 0; j < nt_; ++j) {
     const double a = direction * alpha_row_[j];
-    if (!is_candidate(j, a)) continue;
-    const double bound = a > 0.0 ? (d_[j] + tol) / a : (d_[j] - tol) / a;
-    max_step = std::min(max_step, bound);
+    if (st == VarStatus::kBasic || lower_[j] == upper_[j] || std::fabs(a) < pivot_tol) continue;
+    const bool candidate = a > 0.0 ? (st == VarStatus::kAtLower || st == VarStatus::kAtZero)
+                                   : (st == VarStatus::kAtUpper || st == VarStatus::kAtZero);
+    if (candidate) candidates_.push_back(j);
   }
-  if (max_step == kInf) return -1;
 
-  // Pass 2: among the candidates within that step, the largest pivot.
-  Index best = -1;
-  double best_abs = 0.0;
-  for (Index j = 0; j < nt_; ++j) {
-    const double a = direction * alpha_row_[j];
-    if (!is_candidate(j, a)) continue;
-    if (d_[j] / a <= max_step && std::fabs(a) > best_abs) {
-      best_abs = std::fabs(a);
-      best = j;
+  std::size_t remaining = candidates_.size();
+  while (remaining > 0) {
+    // Harris pass 1: largest step keeping every remaining d_j feasible within the tolerance.
+    double max_step = kInf;
+    for (std::size_t k = 0; k < remaining; ++k) {
+      const Index j = candidates_[k];
+      const double a = direction * alpha_row_[j];
+      max_step = std::min(max_step, a > 0.0 ? (d_[j] + tol) / a : (d_[j] - tol) / a);
     }
+    // The group of breakpoints within that step; pass 2 picks its largest pivot.
+    Index best = -1;
+    double best_abs = 0.0;
+    double reduction = 0.0;
+    for (std::size_t k = 0; k < remaining; ++k) {
+      const Index j = candidates_[k];
+      const double a = direction * alpha_row_[j];
+      if (d_[j] / a > max_step) continue;
+      if (std::fabs(a) > best_abs) {
+        best_abs = std::fabs(a);
+        best = j;
+      }
+      reduction += std::fabs(a) * (upper_[j] - lower_[j]);  // Infinite if not boxed.
+    }
+    // Stop at this group once the remaining infeasibility would be within the tolerance: the row
+    // becomes feasible at (or numerically at) this breakpoint.
+    if (!(slope - reduction > options_.primal_tol)) return best;
+
+    // Pass the whole group: its variables flip to their other bounds.
+    for (std::size_t k = 0; k < remaining;) {
+      const Index j = candidates_[k];
+      if (d_[j] / (direction * alpha_row_[j]) <= max_step) {
+        flips_.push_back(j);
+        candidates_[k] = candidates_[--remaining];
+      } else {
+        ++k;
+      }
+    }
+    slope -= reduction;
   }
-  return best;
+  // Even with every candidate flipped the leaving row stays infeasible: no entering variable.
+  flips_.clear();
+  return -1;
+}
+
+void Simplex::apply_flips() {
+  // Flipping boxed nonbasic variables changes x_B by -B^-1 (sum_j a_j * change_j).
+  std::vector<double> column(static_cast<std::size_t>(m_), 0.0);
+  for (const Index j : flips_) {
+    const double old_value = x_[j];
+    status_[j] = status_[j] == VarStatus::kAtUpper ? VarStatus::kAtLower : VarStatus::kAtUpper;
+    set_value_from_status(j);
+    const double change = x_[j] - old_value;
+    for_column(j, [&](Index i, double a) { column[i] += a * change; });
+  }
+  factor_.ftran(column);
+  for (Index k = 0; k < m_; ++k) x_[basic_[k]] -= column[k];
+  stats_.bound_flips += static_cast<long long>(flips_.size());
 }
 
 Index Simplex::choose_entering_column() const {
@@ -358,7 +422,9 @@ Index Simplex::choose_entering_column() const {
       case VarStatus::kAtZero: score = std::fabs(d_[j]); break;
       case VarStatus::kBasic: continue;
     }
-    if (score > tol && score > best_score) {
+    if (score <= tol) continue;
+    score = score * score / devex_weight_[j];
+    if (score > best_score) {
       best_score = score;
       best = j;
     }
@@ -392,14 +458,13 @@ SimplexStatus Simplex::dual_loop() {
     const bool to_lower = x_[p] < lower_[p];
     const double bound = to_lower ? lower_[p] : upper_[p];
     const double direction = to_lower ? -1.0 : 1.0;
-    const double delta = x_[p] - bound;
 
     rho_.assign(static_cast<std::size_t>(m_), 0.0);
     rho_[r] = 1.0;
     factor_.btran(rho_);
     compute_pivot_row();
 
-    const Index q = dual_ratio_test(direction);
+    const Index q = dual_ratio_test(direction, std::fabs(x_[p] - bound));
     if (q < 0) {
       if (!fresh) {
         if (!refresh()) return SimplexStatus::kNumericalError;
@@ -426,6 +491,11 @@ SimplexStatus Simplex::dual_loop() {
     tau_ = rho_;
     factor_.ftran(tau_);
 
+    // Bound flips from the long-step ratio test move x_B; the leaving variable stays infeasible
+    // on the same side, so its distance to the bound is taken afterwards.
+    if (!flips_.empty()) apply_flips();
+    const double delta = x_[p] - bound;
+
     // Dual step. A slightly infeasible d_q would make the step go the wrong way; shift its cost
     // instead so the step is zero.
     double theta_d = d_[q] / a_row;
@@ -435,8 +505,8 @@ SimplexStatus Simplex::dual_loop() {
       theta_d = 0.0;
     }
     if (theta_d != 0.0) {
-      for (Index j = 0; j < nt_; ++j) {
-        if (status_[j] != VarStatus::kBasic && alpha_row_[j] != 0.0) d_[j] -= theta_d * alpha_row_[j];
+      for (const Index j : row_nz_) {
+        if (status_[j] != VarStatus::kBasic) d_[j] -= theta_d * alpha_row_[j];
       }
     }
     d_[q] = 0.0;
@@ -448,8 +518,11 @@ SimplexStatus Simplex::dual_loop() {
     x_[q] += theta_p;
     x_[p] = bound;
 
-    // Dual steepest-edge weights (Forrest–Goldfarb update).
-    const double w_r = dse_weight_[r];
+    // Dual steepest-edge weights (Forrest–Goldfarb update). The pivot row's weight is known
+    // exactly as ||rho||^2; using it instead of the updated value keeps rounding errors from
+    // accumulating in the recurrence.
+    double w_r = 0.0;
+    for (const double v : rho_) w_r += v * v;
     for (Index k = 0; k < m_; ++k) {
       if (k == r || alpha_col_[k] == 0.0) continue;
       const double ratio = alpha_col_[k] / a_col;
@@ -476,6 +549,8 @@ SimplexStatus Simplex::dual_loop() {
 SimplexStatus Simplex::primal_loop(LoopResult& result) {
   result = LoopResult::kDone;
   if (!rebuild()) return SimplexStatus::kNumericalError;
+  // Devex reference framework: the current nonbasic variables.
+  std::fill(devex_weight_.begin(), devex_weight_.end(), 1.0);
   bool fresh = true;
   const auto refresh = [&] {
     if (!rebuild()) return false;
@@ -483,7 +558,10 @@ SimplexStatus Simplex::primal_loop(LoopResult& result) {
     return true;
   };
   const double ptol = options_.primal_tol;
-  if (max_primal_infeasibility() > ptol) {
+  // Rounding drift of a few tolerances is absorbed by the Harris ratio test during the loop; only
+  // the final point must be feasible within the tolerance (the dual simplex repairs it if not).
+  const double drift_tol = 100.0 * ptol;
+  if (max_primal_infeasibility() > drift_tol) {
     result = LoopResult::kLostFeasibility;
     return SimplexStatus::kOptimal;
   }
@@ -493,7 +571,7 @@ SimplexStatus Simplex::primal_loop(LoopResult& result) {
     if (limit_reached(limit)) return limit;
     if (factor_.should_refactor()) {
       if (!refresh()) return SimplexStatus::kNumericalError;
-      if (max_primal_infeasibility() > ptol) {
+      if (max_primal_infeasibility() > drift_tol) {
         result = LoopResult::kLostFeasibility;
         return SimplexStatus::kOptimal;
       }
@@ -501,13 +579,12 @@ SimplexStatus Simplex::primal_loop(LoopResult& result) {
 
     const Index q = choose_entering_column();
     if (q < 0) {
-      if (fresh) return SimplexStatus::kOptimal;
-      if (!refresh()) return SimplexStatus::kNumericalError;
-      if (max_primal_infeasibility() > ptol) {
-        result = LoopResult::kLostFeasibility;
-        return SimplexStatus::kOptimal;
+      if (!fresh) {
+        if (!refresh()) return SimplexStatus::kNumericalError;
+        continue;
       }
-      continue;
+      if (max_primal_infeasibility() > ptol) result = LoopResult::kLostFeasibility;
+      return SimplexStatus::kOptimal;
     }
     const double dir = d_[q] < 0.0 ? 1.0 : -1.0;
     load_column(q, alpha_col_);
@@ -588,11 +665,17 @@ SimplexStatus Simplex::primal_loop(LoopResult& result) {
     }
 
     const double theta_d = d_[q] / a_row;
-    for (Index j = 0; j < nt_; ++j) {
-      if (status_[j] != VarStatus::kBasic && alpha_row_[j] != 0.0) d_[j] -= theta_d * alpha_row_[j];
+    const double w_q = devex_weight_[q];
+    for (const Index j : row_nz_) {
+      if (status_[j] != VarStatus::kBasic) {
+        d_[j] -= theta_d * alpha_row_[j];
+        const double ratio = alpha_row_[j] / a_row;
+        devex_weight_[j] = std::max(devex_weight_[j], ratio * ratio * w_q);
+      }
     }
     d_[q] = 0.0;
     d_[p] = -theta_d;
+    devex_weight_[p] = std::max(w_q / (a_row * a_row), 1.0);
 
     for (Index k = 0; k < m_; ++k) x_[basic_[k]] -= step * dir * alpha_col_[k];
     x_[q] += step * dir;
@@ -684,11 +767,14 @@ SimplexStatus Simplex::phase2() {
 }
 
 SimplexStatus Simplex::solve_dual_infeasible() {
-  // Decide primal feasibility with a zero objective (trivially dual feasible) ...
+  // Decide primal feasibility with a zero objective (trivially dual feasible) ... An all-zero
+  // objective makes every ratio test a tie and the dual simplex stalls, so use small random costs
+  // oriented to keep the starting basis dual feasible; the feasible region is unchanged.
   std::fill(cost_.begin(), cost_.end(), 0.0);
   compute_dual();
   place_nonbasic_dual_feasible();
   compute_primal();
+  perturb_costs(kFeasibilityCostBase);
   SimplexStatus status = dual_loop();
   log_.log(2, "simplex: feasibility search %s after %lld iterations", to_string(status),
            iterations_);
@@ -736,7 +822,7 @@ SimplexStatus Simplex::solve() {
   }
   place_nonbasic_dual_feasible();
   compute_primal();
-  if (options_.perturb) perturb_costs();
+  if (options_.perturb) perturb_costs(kPerturbationBase);
   return phase2();
 }
 

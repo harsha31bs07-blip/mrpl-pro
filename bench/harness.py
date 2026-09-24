@@ -63,6 +63,24 @@ def run_highs(exe: str, instance: Path, time_limit: float, threads: int) -> dict
             "solve_seconds": wall, "wall_seconds": wall}
 
 
+def run_highspy(instance: Path, time_limit: float, threads: int) -> dict:
+    import highspy  # Optional dependency, used only as a comparison baseline.
+
+    h = highspy.Highs()
+    h.setOptionValue("output_flag", False)
+    h.setOptionValue("time_limit", float(time_limit))
+    h.setOptionValue("threads", int(threads))
+    h.readModel(str(instance))
+    start = time.perf_counter()
+    h.run()
+    wall = time.perf_counter() - start
+    raw = h.modelStatusToString(h.getModelStatus()).lower()
+    status = {"optimal": "optimal", "infeasible": "infeasible", "unbounded": "unbounded",
+              "time limit reached": "time_limit"}.get(raw, raw.replace(" ", "_"))
+    objective = h.getInfo().objective_function_value if status == "optimal" else None
+    return {"status": status, "objective": objective, "solve_seconds": wall, "wall_seconds": wall}
+
+
 def shifted_geomean(values: list[float], shift: float = 10.0) -> float:
     if not values:
         return float("nan")
@@ -75,8 +93,9 @@ def main() -> int:
     parser.add_argument("instances", nargs="+", type=Path,
                         help="instance files or directories containing *.mps / *.qps")
     parser.add_argument("--samaya", type=Path, default=DEFAULT_SAMAYA)
-    parser.add_argument("--baseline", action="append", default=[], choices=["highs"],
-                        help="also run a baseline solver found on PATH")
+    parser.add_argument("--baseline", action="append", default=[], choices=["highs", "highspy"],
+                        help="also run a baseline solver: the highs executable on PATH, or the "
+                             "highspy Python module")
     parser.add_argument("--time-limit", type=float, default=300.0)
     parser.add_argument("--threads", type=int, default=1)
     parser.add_argument("--out", type=Path, default=REPO / "bench" / "results" / "results.csv")
@@ -98,6 +117,9 @@ def main() -> int:
 
     solvers = {"samaya": lambda f: run_samaya(args.samaya, f, args.time_limit, args.threads)}
     for name in args.baseline:
+        if name == "highspy":
+            solvers[name] = lambda f: run_highspy(f, args.time_limit, args.threads)
+            continue
         exe = shutil.which(name)
         if exe is None:
             print(f"baseline '{name}' not found on PATH", file=sys.stderr)
@@ -122,6 +144,25 @@ def main() -> int:
         writer.writerows(rows)
 
     print(f"\nWrote {args.out}")
+    if len(solvers) > 1:
+        by_instance: dict[str, dict[str, dict]] = {}
+        for r in rows:
+            by_instance.setdefault(r["instance"], {})[r["solver"]] = r
+        disagreements = 0
+        for inst, results in by_instance.items():
+            base = [r for s, r in results.items() if s != "samaya"]
+            mine = results.get("samaya")
+            for other in base:
+                same_status = mine["status"] == other["status"]
+                same_obj = True
+                if same_status and mine["status"] == "optimal":
+                    a, b = mine["objective"], other["objective"]
+                    same_obj = abs(a - b) <= 1e-6 * (1 + abs(b))
+                if not (same_status and same_obj):
+                    disagreements += 1
+                    print(f"  DISAGREE {inst}: samaya {mine['status']} {mine['objective']} vs "
+                          f"{other['solver']} {other['status']} {other['objective']}")
+        print(f"Status/objective disagreements with baselines: {disagreements}")
     for solver in solvers:
         mine = [r for r in rows if r["solver"] == solver]
         solved = [r for r in mine if r["status"] in SOLVED]

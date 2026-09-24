@@ -101,7 +101,7 @@ class Simplex {
   void set_value_from_status(Index j);
   void place_nonbasic_dual_feasible();
   bool correct_dual_infeasibilities();
-  void perturb_costs();
+  void perturb_costs(double base);
   Index count_dual_infeasibilities_unboxed() const;
   double max_primal_infeasibility() const;
   double max_dual_infeasibility() const;
@@ -114,7 +114,8 @@ class Simplex {
   SimplexStatus primal_loop(LoopResult& result);
 
   Index choose_leaving_row() const;
-  Index dual_ratio_test(double direction) const;
+  Index dual_ratio_test(double direction, double slope);
+  void apply_flips();
   Index choose_entering_column() const;
 
   template <typename F>
@@ -141,10 +142,15 @@ class Simplex {
   std::vector<double> lower_;
   std::vector<double> upper_;
   std::vector<double> dse_weight_;
+  std::vector<double> devex_weight_;  // Primal Devex reference weights (n + m).
 
   std::vector<double> rho_;
   std::vector<double> tau_;
   std::vector<double> alpha_row_;
+  std::vector<Index> row_nz_;       // Indices of the nonzeros of alpha_row_.
+  std::vector<char> in_row_nz_;
+  std::vector<Index> candidates_;   // Ratio test workspace.
+  std::vector<Index> flips_;        // Boxed variables flipped by the long-step ratio test.
   std::vector<double> alpha_col_;
   std::vector<double> spike_;
   std::vector<double> dual_ray_;
