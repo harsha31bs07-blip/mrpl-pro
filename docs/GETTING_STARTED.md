@@ -223,8 +223,9 @@ The CPU presets must keep working without CUDA installed; CI has no GPU.
 #### G1: kernels
 
 > Implement the WP2 kernels in `src/gpu/`, double precision throughout: (1) CSR SpMV
-> `y = A x` with one warp per row, used for both `A` and `Aᵀ` (upload the row-wise copies
-> `LpProblem::At` and the transpose of that, so both products are row-wise); (2) fused vector
+> `y = A x` with one warp per row, used for both products: the CSC arrays of `LpProblem::At`
+> are `A` in CSR form, and the CSC arrays of `LpProblem::A` are `Aᵀ` in CSR form, so upload both
+> as-is (the `-I` block of `K = [A -I]` is handled inside the vector kernels); (2) fused vector
 > kernels: `axpby`, projection onto `[lower, upper]` with infinite bounds, and the PDLP primal
 > and dual update steps; (3) reductions for dot products and 2-norms (two-stage block
 > reduction, no atomics on doubles). Do **not** use cuSPARSE or cuBLAS. Tests in
