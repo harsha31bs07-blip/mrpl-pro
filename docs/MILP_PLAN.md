@@ -76,6 +76,9 @@ above, which ignores such instances.
 | + A1 time limit, A3 heuristics | 43 | 12.8% | 3 | 0 |
 | + A2 probing, coefficient tightening, nearly-integral node fix | 45 | 11.4% | 3 | 0 |
 | + parallel search (run with 1 thread), pseudocost fix, dive backoff | 46 | 11.6% | 3 | 0 |
+| + RINS time budget | 46 | 10.2% | 4 | 0 |
+| + LP speed-ups (warm-start refactorization, propagation, optimality check) | 48 | 12.0% | 5 | 0 |
+| + aggregated c-MIR with variable bounds, strong-branching cap | 47 | 9.3% | 6 | 0 |
 
 **Done:**
 - **A1:** runs end within the time limit (the node release time is reserved).
@@ -86,8 +89,15 @@ above, which ignores such instances.
 - **A correctness fix:** a node whose LP point was integral only within the tolerance could be
   pruned (found by the MRPL crude case).
 
-**Tried and dropped:** variable-upper-bound substitution in c-MIR (A4); no MIPLIB root bound
-moved.
+**Tried and dropped:**
+- Single-row variable-upper-bound substitution in c-MIR (A4): no MIPLIB root bound moved. It
+  pays off only with multi-row aggregation, which is now in.
+- Sorted bound-flip groups in the ratio test: no measurable gain.
+- Build flags: LTO +0.5%, `-march=native` +2.5%, profile-guided optimization about +4% on mas76.
+  All within noise; the time is in sparse, memory-bound code, so the build stays simple.
+
+Same-machine comparison with HiGHS, SCIP, CBC and GLPK:
+[results/comparison.md](results/comparison.md).
 
 ## Rules for every milestone
 
