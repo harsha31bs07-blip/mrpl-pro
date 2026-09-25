@@ -24,11 +24,11 @@ struct MipOptions {
   int reliability = 4;
   int max_strong_branching = 8;       // Strong-branching candidates per node.
   long long strong_iterations = 200;  // Dual simplex iterations per strong-branching child.
-  // Beyond this many open nodes the search always dives (depth first), which stops the open
-  // list from growing; beyond the hard limit it stops with kNodeLimit instead of exhausting
-  // memory.
-  std::size_t max_open_nodes_soft = 1000000;
-  std::size_t max_open_nodes = 3000000;
+  // Beyond the soft limit of open nodes the search switches to depth first (a LIFO stack), which
+  // stops the open list from growing; beyond the hard limit it stops with kNodeLimit instead of
+  // exhausting memory. An open node costs about 400 bytes, so the defaults stay near 2 GB.
+  std::size_t max_open_nodes_soft = 2500000;
+  std::size_t max_open_nodes = 5000000;
   // Root cutting planes (Gomory mixed-integer, c-MIR, lifted knapsack covers).
   bool cuts = true;
   int max_cut_rounds = 20;
@@ -170,6 +170,7 @@ class BranchAndBound {
   long long pc_total_count_[2] = {0, 0};
 
   std::multimap<double, Node> open_;
+  std::vector<Node> dive_stack_;  // Depth-first mode once open_ reaches the soft limit.
   double incumbent_value_ = kInf;
   std::vector<double> incumbent_;
   double pruned_bound_ = kInf;  // Smallest bound among nodes pruned by the cutoff.

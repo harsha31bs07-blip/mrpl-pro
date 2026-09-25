@@ -33,6 +33,13 @@ constexpr double kMinCutEfficacy = 1e-5;
 constexpr double kMaxCutParallelism = 0.995;
 constexpr double kCutStallImprovement = 1e-4;  // Relative bound gain that counts as progress.
 constexpr int kCutStallRounds = 3;
+// The cut loop may take this multiple of the root LP time (at least kCutLoopMinSeconds, at most
+// kCutLoopTimeFraction of the time limit); cuts are dropped if they improve the root bound by
+// less than kCutMinTotalGain relative.
+constexpr double kCutLoopRootFactor = 5.0;
+constexpr double kCutLoopMinSeconds = 1.0;
+constexpr double kCutLoopTimeFraction = 0.1;
+constexpr double kCutMinTotalGain = 1e-6;
 
 }  // namespace
 
@@ -192,6 +199,7 @@ double BranchAndBound::effective_bound(double objective) const {
 double BranchAndBound::best_bound(double extra) const {
   double bound = extra;
   if (!open_.empty()) bound = std::min(bound, open_.begin()->first);
+  for (const Node& node : dive_stack_) bound = std::min(bound, node.bound);
   return effective_bound(bound);
 }
 
@@ -563,11 +571,20 @@ int BranchAndBound::separate_and_add_cuts() {
 
 void BranchAndBound::root_cut_loop() {
   if (!options_.cuts || integers_.empty()) return;
+  const Timer loop_timer;
   if (solve_relaxation(nullptr, -1) != SimplexStatus::kOptimal) return;
+  const double root_seconds = loop_timer.seconds();
   double bound = relaxation_objective();
+  const double initial_bound = bound;
   outcome_.root_bound = sense_ * bound;
+  // Rounds re-solve an ever larger LP; on big models they can cost more than they save.
+  double budget = std::max(kCutLoopMinSeconds, kCutLoopRootFactor * root_seconds);
+  if (std::isfinite(options_.time_limit)) {
+    budget = std::min(budget, kCutLoopTimeFraction * options_.time_limit);
+  }
   int stalls = 0;
   for (int round = 0; round < options_.max_cut_rounds && !time_up(); ++round) {
+    if (loop_timer.seconds() > budget) break;
     if (std::none_of(integers_.begin(), integers_.end(),
                      [&](Index j) { return is_fractional(x_[j]); })) {
       break;
@@ -601,6 +618,18 @@ void BranchAndBound::root_cut_loop() {
     bound = next;
   }
 
+  // Cuts that did not move the bound only slow down every node LP: drop them all.
+  if (lp_status_ == SimplexStatus::kOptimal && m_ > original_rows_ &&
+      relaxation_objective() - initial_bound <=
+          kCutMinTotalGain * std::max(1.0, std::fabs(initial_bound))) {
+    std::vector<VarStatus> basis = simplex_->status();
+    basis.resize(static_cast<std::size_t>(n_ + original_rows_));
+    std::vector<Index> rows;
+    for (Index i = original_rows_; i < m_; ++i) rows.push_back(i);
+    remove_rows(rows);
+    build_relaxation();
+    solve_relaxation(&basis, -1);
+  }
   // Keep only the cuts that are binding at the final root LP.
   if (lp_status_ == SimplexStatus::kOptimal && m_ > original_rows_) {
     std::vector<double> activity(static_cast<std::size_t>(m_), 0.0);
@@ -629,9 +658,9 @@ void BranchAndBound::root_cut_loop() {
     root_basis_ = simplex_->status();
     outcome_.root_bound_cuts = sense_ * relaxation_objective();
   }
-  log_.log(1, "MIP root bound %.10g -> %.10g after %d cut rounds, %d cuts kept",
+  log_.log(1, "MIP root bound %.10g -> %.10g after %d cut rounds, %d cuts kept, %.2f s",
            outcome_.root_bound, outcome_.root_bound_cuts, outcome_.cut_rounds,
-           outcome_.cuts_added);
+           outcome_.cuts_added, loop_timer.seconds());
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -843,6 +872,10 @@ MipOutcome BranchAndBound::solve() {
   bool gap_closed = false;
   double last_log = 0.0;
   for (;;) {
+    if (!current && !dive_stack_.empty()) {
+      current = std::move(dive_stack_.back());
+      dive_stack_.pop_back();
+    }
     if (!current) {
       if (open_.empty()) break;
       auto it = open_.begin();
@@ -903,12 +936,17 @@ MipOutcome BranchAndBound::solve() {
     // Plunge into the child on the side the value is closer to; queue the other.
     const std::size_t dive = children[0].branch_distance >= 0.5 ? 1 : 0;
     Node& other = children[1 - dive];
-    open_.emplace(other.bound, std::move(other));
     Node& next = children[dive];
+    if (!dive_stack_.empty() || open_.size() >= options_.max_open_nodes_soft) {
+      // Memory mode: depth first with a LIFO stack, so the stored nodes are bounded by the
+      // depth instead of growing with the node count. Best-bound resumes when it empties.
+      dive_stack_.push_back(std::move(other));
+      current = std::move(next);
+      continue;
+    }
+    open_.emplace(other.bound, std::move(other));
     bool keep = false;
-    if (open_.size() >= options_.max_open_nodes_soft) {
-      keep = true;  // Depth first keeps the open list from growing.
-    } else if (incumbent_value_ == kInf) {
+    if (incumbent_value_ == kInf) {
       keep = next.depth < kMaxPlungeDepth;
     } else {
       const double best = open_.empty() ? next.bound : open_.begin()->first;
