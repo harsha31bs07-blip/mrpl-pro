@@ -79,11 +79,115 @@ def run_highspy(instance: Path, time_limit: float, threads: int, gap: float) -> 
     status = {"optimal": "optimal", "infeasible": "infeasible", "unbounded": "unbounded",
               "time limit reached": "time_limit"}.get(raw, raw.replace(" ", "_"))
     info = h.getInfo()
-    objective = info.objective_function_value if status == "optimal" else None
+    # The best solution's objective, also when a limit stopped the search.
+    has_solution = info.primal_solution_status == 2  # kSolutionStatusFeasible
+    objective = info.objective_function_value if status == "optimal" or has_solution else None
     is_mip = any(t != highspy.HighsVarType.kContinuous for t in h.getLp().integrality_)
     return {"status": status, "objective": objective, "solve_seconds": wall, "wall_seconds": wall,
             "nodes": info.mip_node_count if is_mip else None,
             "class": "MILP" if is_mip else "LP"}
+
+
+def run_scip(instance: Path, time_limit: float, threads: int, gap: float) -> dict:
+    import pyscipopt  # Optional dependency (pip install pyscipopt), a comparison baseline only.
+
+    m = pyscipopt.Model()
+    m.hideOutput()
+    m.readProblem(str(instance))
+    m.setParam("limits/time", float(time_limit))
+    m.setParam("limits/gap", float(gap))
+    start = time.perf_counter()
+    m.optimize()
+    wall = time.perf_counter() - start
+    raw = m.getStatus()
+    status = {"optimal": "optimal", "infeasible": "infeasible", "unbounded": "unbounded",
+              "inforunbd": "infeasible_or_unbounded", "timelimit": "time_limit"}.get(raw, raw)
+    objective = m.getObjVal() if m.getNSols() > 0 else None
+    is_mip = any(v.vtype() != "CONTINUOUS" for v in m.getVars(transformed=False))
+    return {"status": status, "objective": objective, "solve_seconds": wall, "wall_seconds": wall,
+            "nodes": m.getNNodes() if is_mip else None, "class": "MILP" if is_mip else "LP"}
+
+
+def to_lp_file(instance: Path, tmp: Path) -> Path:
+    """CBC reads free MPS as fixed format and GLPK rejects OBJSENSE, so both get the model in
+    CPLEX LP format, written by SCIP (pip install pyscipopt). Conversion time is not measured."""
+    import pyscipopt
+
+    m = pyscipopt.Model()
+    m.hideOutput()
+    m.readProblem(str(instance))
+    out = tmp / "model.lp"
+    m.writeProblem(str(out), trans=False, genericnames=True, verbose=False)
+    return out
+
+def run_cbc(exe: str, instance: Path, time_limit: float, threads: int, gap: float) -> dict:
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        model = to_lp_file(instance, Path(tmp))
+        cmd = [exe, str(model), "-seconds", str(time_limit), "-ratioGap", str(gap), "-threads", str(threads),
+            "-solve", "-quit"]
+        start = time.perf_counter()
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=time_limit + 60)
+        except subprocess.TimeoutExpired:
+            return {"status": "killed", "wall_seconds": time.perf_counter() - start}
+        wall = time.perf_counter() - start
+    out = proc.stdout
+    status = "unknown"
+    if re.search(r"Result - Optimal solution found|^Optimal - objective value", out, re.M):
+        status = "optimal"
+    elif re.search(r"infeasible", out, re.I) and re.search(r"Result - |Problem is infeasible",
+                                                            out):
+        status = "infeasible"
+    elif re.search(r"unbounded", out, re.I) and re.search(r"Result - |Problem is unbounded", out):
+        status = "unbounded"
+    elif re.search(r"Stopped on time", out):
+        status = "time_limit"
+    obj = re.search(r"Objective value:\s*(\S+)", out) or re.search(
+        r"Optimal - objective value\s*(\S+)", out)
+    objective = None
+    if obj and status in ("optimal", "time_limit"):
+        try:
+            objective = float(obj.group(1))
+        except ValueError:
+            objective = None
+    if status == "time_limit" and re.search(r"No feasible solution found", out):
+        objective = None
+    nodes = re.search(r"Enumerated nodes:\s*(\d+)", out)
+    return {"status": status, "objective": objective, "solve_seconds": wall, "wall_seconds": wall,
+            "nodes": int(nodes.group(1)) if nodes else None}
+
+
+def run_glpk(exe: str, instance: Path, time_limit: float, threads: int, gap: float) -> dict:
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        model = to_lp_file(instance, Path(tmp))
+        report = Path(tmp) / "out.txt"
+        cmd = [exe, "--lp", str(model), "--tmlim", str(max(1, int(time_limit))),
+               "--mipgap", str(gap), "-o", str(report)]
+        start = time.perf_counter()
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=time_limit + 60)
+        except subprocess.TimeoutExpired:
+            return {"status": "killed", "wall_seconds": time.perf_counter() - start}
+        wall = time.perf_counter() - start
+        text = report.read_text() if report.exists() else ""
+    out = proc.stdout
+    raw = re.search(r"^Status:\s*(.+)$", text, re.M)
+    raw = raw.group(1).strip() if raw else ""
+    status = {"OPTIMAL": "optimal", "INTEGER OPTIMAL": "optimal", "INFEASIBLE (FINAL)": "infeasible",
+              "INTEGER EMPTY": "infeasible", "UNBOUNDED": "unbounded",
+              "INTEGER NON-OPTIMAL": "time_limit", "UNDEFINED": "time_limit"}.get(raw, "unknown")
+    if "TIME LIMIT EXCEEDED" in out and status == "unknown":
+        status = "time_limit"
+    if re.search(r"PROBLEM HAS NO (PRIMAL )?FEASIBLE", out):
+        status = "infeasible"
+    obj = re.search(r"^Objective:\s*\S+\s*=\s*(\S+)", text, re.M)
+    objective = float(obj.group(1)) if obj and status in ("optimal", "time_limit") and \
+        raw != "UNDEFINED" else None
+    return {"status": status, "objective": objective, "solve_seconds": wall, "wall_seconds": wall}
 
 
 def read_solu(path: Path) -> dict[str, tuple[str, float | None]]:
@@ -109,9 +213,10 @@ def main() -> int:
     parser.add_argument("instances", nargs="+", type=Path,
                         help="instance files or directories containing *.mps / *.qps")
     parser.add_argument("--samaya", type=Path, default=DEFAULT_SAMAYA)
-    parser.add_argument("--baseline", action="append", default=[], choices=["highs", "highspy"],
-                        help="also run a baseline solver: the highs executable on PATH, or the "
-                             "highspy Python module")
+    parser.add_argument("--baseline", action="append", default=[],
+                        choices=["highs", "highspy", "scip", "cbc", "glpk"],
+                        help="also run a baseline solver: the highs, cbc or glpsol executable on "
+                             "PATH, or the highspy / pyscipopt Python module (scip)")
     parser.add_argument("--time-limit", type=float, default=300.0)
     parser.add_argument("--threads", type=int, default=1)
     parser.add_argument("--mip-gap", type=float, default=1e-4,
@@ -141,11 +246,16 @@ def main() -> int:
         if name == "highspy":
             solvers[name] = lambda f: run_highspy(f, args.time_limit, args.threads, gap)
             continue
-        exe = shutil.which(name)
+        if name == "scip":
+            solvers[name] = lambda f: run_scip(f, args.time_limit, args.threads, gap)
+            continue
+        exe = shutil.which({"glpk": "glpsol"}.get(name, name))
         if exe is None:
             print(f"baseline '{name}' not found on PATH", file=sys.stderr)
             return 1
-        solvers[name] = lambda f, exe=exe: run_highs(exe, f, args.time_limit, args.threads, gap)
+        runner = {"highs": run_highs, "cbc": run_cbc, "glpk": run_glpk}[name]
+        solvers[name] = lambda f, exe=exe, runner=runner: runner(
+            exe, f, args.time_limit, args.threads, gap)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     rows = []
