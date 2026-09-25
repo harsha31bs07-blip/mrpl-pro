@@ -3,7 +3,8 @@
 #
 #   bench/fetch_instances.sh netlib           # Netlib LP (decoded from netlib's compressed EMPS format)
 #   bench/fetch_instances.sh netlib-infeas    # Netlib infeasible LPs
-#   bench/fetch_instances.sh miplib           # MIPLIB 2017 benchmark set
+#   bench/fetch_instances.sh miplib           # MIPLIB 2017 benchmark set (330 MB)
+#   bench/fetch_instances.sh miplib-list FILE # MIPLIB 2017 instances named in FILE, one per line
 #
 # Instances are never committed (see .gitignore). Requires curl, a C compiler, gunzip and unzip.
 set -euo pipefail
@@ -62,12 +63,37 @@ fetch_miplib() {
   curl -fsSL https://miplib.zib.de/downloads/miplib2017-v31.solu -o "${dest}/miplib2017.solu" || true
 }
 
+# fetch_miplib_list <file>: instances listed in <file> (names, '#' comments) into
+# bench/instances/<file stem>/, with the known solutions.
+fetch_miplib_list() {
+  local list="$1"
+  local dest="${dest_root}/$(basename "${list%.*}")"
+  mkdir -p "${dest}"
+  grep -v '^#' "${list}" | while read -r name; do
+    [[ -z "${name}" || -s "${dest}/${name}.mps" ]] && continue
+    echo "miplib: ${name}"
+    if curl -fsSL "https://miplib.zib.de/WebData/instances/${name}.mps.gz" -o "${dest}/${name}.mps.gz"; then
+      gunzip -f "${dest}/${name}.mps.gz"
+    else
+      echo "miplib: ${name} not available, skipped" >&2
+    fi
+  done
+  curl -fsSL https://miplib.zib.de/downloads/miplib2017-v31.solu -o "${dest}/miplib2017.solu" || true
+}
+
 if [[ $# -eq 0 ]]; then
-  echo "usage: $0 netlib|netlib-infeas|miplib ..." >&2
+  echo "usage: $0 netlib|netlib-infeas|miplib|miplib-list FILE ..." >&2
   exit 2
 fi
-for set in "$@"; do
+while [[ $# -gt 0 ]]; do
+  set="$1"
+  shift
   case "${set}" in
+    miplib-list)
+      [[ $# -gt 0 ]] || { echo "miplib-list needs a file" >&2; exit 2; }
+      fetch_miplib_list "$1"
+      shift
+      ;;
     netlib) fetch_emps data "${dest_root}/netlib" "${netlib_names[@]}" ;;
     netlib-infeas) fetch_emps infeas "${dest_root}/netlib-infeas" "${netlib_infeas_names[@]}" ;;
     miplib) fetch_miplib ;;

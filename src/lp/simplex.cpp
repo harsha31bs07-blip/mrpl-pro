@@ -35,6 +35,11 @@ BasisFactor::Options factor_options(const SimplexOptions& options) {
 
 }  // namespace
 
+void Simplex::set_iteration_limit(long long limit) {
+  options_.max_iterations = limit;
+  max_iterations_ = limit >= 0 ? limit : std::max<long long>(100000, 100LL * static_cast<long long>(nt_));
+}
+
 Simplex::Simplex(const LpProblem& lp, const SimplexOptions& options, const Logger& log)
     : lp_(lp),
       options_(options),
@@ -44,9 +49,7 @@ Simplex::Simplex(const LpProblem& lp, const SimplexOptions& options, const Logge
       nt_(lp.n + lp.m),
       factor_(lp.A, factor_options(options)),
       rng_(options.seed) {
-  max_iterations_ = options.max_iterations >= 0
-                        ? options.max_iterations
-                        : std::max<long long>(100000, 100LL * static_cast<long long>(nt_));
+  set_iteration_limit(options.max_iterations);
   const auto m = static_cast<std::size_t>(m_);
   const auto nt = static_cast<std::size_t>(nt_);
   basic_.resize(m);

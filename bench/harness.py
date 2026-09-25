@@ -28,9 +28,9 @@ DEFAULT_SAMAYA = REPO / "build" / "release" / "apps" / "cli" / "samaya"
 SOLVED = {"optimal", "infeasible", "unbounded"}
 
 
-def run_samaya(exe: Path, instance: Path, time_limit: float, threads: int) -> dict:
+def run_samaya(exe: Path, instance: Path, time_limit: float, threads: int, gap: float) -> dict:
     cmd = [str(exe), "--json", "--log-level", "0", "--time-limit", str(time_limit),
-           "--threads", str(threads), str(instance)]
+           "--threads", str(threads), "--mip-gap", str(gap), str(instance)]
     start = time.perf_counter()
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=time_limit + 60)
@@ -45,7 +45,7 @@ def run_samaya(exe: Path, instance: Path, time_limit: float, threads: int) -> di
     return result
 
 
-def run_highs(exe: str, instance: Path, time_limit: float, threads: int) -> dict:
+def run_highs(exe: str, instance: Path, time_limit: float, threads: int, gap: float) -> dict:
     cmd = [exe, "--time_limit", str(time_limit), "--model_file", str(instance)]
     start = time.perf_counter()
     try:
@@ -63,13 +63,14 @@ def run_highs(exe: str, instance: Path, time_limit: float, threads: int) -> dict
             "solve_seconds": wall, "wall_seconds": wall}
 
 
-def run_highspy(instance: Path, time_limit: float, threads: int) -> dict:
+def run_highspy(instance: Path, time_limit: float, threads: int, gap: float) -> dict:
     import highspy  # Optional dependency, used only as a comparison baseline.
 
     h = highspy.Highs()
     h.setOptionValue("output_flag", False)
     h.setOptionValue("time_limit", float(time_limit))
     h.setOptionValue("threads", int(threads))
+    h.setOptionValue("mip_rel_gap", float(gap))
     h.readModel(str(instance))
     start = time.perf_counter()
     h.run()
@@ -77,8 +78,23 @@ def run_highspy(instance: Path, time_limit: float, threads: int) -> dict:
     raw = h.modelStatusToString(h.getModelStatus()).lower()
     status = {"optimal": "optimal", "infeasible": "infeasible", "unbounded": "unbounded",
               "time limit reached": "time_limit"}.get(raw, raw.replace(" ", "_"))
-    objective = h.getInfo().objective_function_value if status == "optimal" else None
-    return {"status": status, "objective": objective, "solve_seconds": wall, "wall_seconds": wall}
+    info = h.getInfo()
+    objective = info.objective_function_value if status == "optimal" else None
+    is_mip = any(t != highspy.HighsVarType.kContinuous for t in h.getLp().integrality_)
+    return {"status": status, "objective": objective, "solve_seconds": wall, "wall_seconds": wall,
+            "nodes": info.mip_node_count if is_mip else None,
+            "class": "MILP" if is_mip else "LP"}
+
+
+def read_solu(path: Path) -> dict[str, tuple[str, float | None]]:
+    """Reads a MIPLIB .solu file: =opt= / =best= name value, =inf= name."""
+    known: dict[str, tuple[str, float | None]] = {}
+    for line in path.read_text().splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[0] in ("=opt=", "=best=", "=inf=", "=unbd="):
+            value = float(parts[2]) if len(parts) > 2 and parts[0] in ("=opt=", "=best=") else None
+            known[parts[1]] = (parts[0].strip("="), value)
+    return known
 
 
 def shifted_geomean(values: list[float], shift: float = 10.0) -> float:
@@ -98,6 +114,10 @@ def main() -> int:
                              "highspy Python module")
     parser.add_argument("--time-limit", type=float, default=300.0)
     parser.add_argument("--threads", type=int, default=1)
+    parser.add_argument("--mip-gap", type=float, default=1e-4,
+                        help="relative MIP gap for every solver (default 1e-4)")
+    parser.add_argument("--solu", type=Path,
+                        help="MIPLIB .solu file of known optimal values to check samaya against")
     parser.add_argument("--out", type=Path, default=REPO / "bench" / "results" / "results.csv")
     args = parser.parse_args()
 
@@ -115,25 +135,30 @@ def main() -> int:
               "`cmake --preset release && cmake --build --preset release`", file=sys.stderr)
         return 1
 
-    solvers = {"samaya": lambda f: run_samaya(args.samaya, f, args.time_limit, args.threads)}
+    gap = args.mip_gap
+    solvers = {"samaya": lambda f: run_samaya(args.samaya, f, args.time_limit, args.threads, gap)}
     for name in args.baseline:
         if name == "highspy":
-            solvers[name] = lambda f: run_highspy(f, args.time_limit, args.threads)
+            solvers[name] = lambda f: run_highspy(f, args.time_limit, args.threads, gap)
             continue
         exe = shutil.which(name)
         if exe is None:
             print(f"baseline '{name}' not found on PATH", file=sys.stderr)
             return 1
-        solvers[name] = lambda f, exe=exe: run_highs(exe, f, args.time_limit, args.threads)
+        solvers[name] = lambda f, exe=exe: run_highs(exe, f, args.time_limit, args.threads, gap)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     rows = []
     for instance in files:
         for solver, run in solvers.items():
             r = run(instance)
-            row = {"instance": instance.stem, "solver": solver, "status": r.get("status"),
+            name = instance.name
+            for suffix in (".gz", ".mps", ".qps"):
+                name = name.removesuffix(suffix)
+            row = {"instance": name, "solver": solver, "status": r.get("status"),
                    "objective": r.get("objective"), "solve_seconds": r.get("solve_seconds"),
-                   "wall_seconds": round(r["wall_seconds"], 4), "nodes": r.get("nodes")}
+                   "wall_seconds": round(r["wall_seconds"], 4), "nodes": r.get("nodes"),
+                   "class": r.get("class"), "verified": r.get("verified")}
             rows.append(row)
             print(f"{instance.stem:<20} {solver:<8} {row['status']:<16} obj={row['objective']}"
                   f" t={row['wall_seconds']:.3f}s", flush=True)
@@ -157,12 +182,37 @@ def main() -> int:
                 same_obj = True
                 if same_status and mine["status"] == "optimal":
                     a, b = mine["objective"], other["objective"]
-                    same_obj = abs(a - b) <= 1e-6 * (1 + abs(b))
+                    # Each MIP solver may stop anywhere within its relative gap.
+                    tol = 2 * gap if mine.get("class") == "MILP" else 1e-6
+                    same_obj = abs(a - b) <= tol * max(1.0, abs(b))
                 if not (same_status and same_obj):
                     disagreements += 1
                     print(f"  DISAGREE {inst}: samaya {mine['status']} {mine['objective']} vs "
                           f"{other['solver']} {other['status']} {other['objective']}")
         print(f"Status/objective disagreements with baselines: {disagreements}")
+    if args.solu:
+        known = read_solu(args.solu)
+        correct = wrong = unknown = 0
+        for r in rows:
+            if r["solver"] != "samaya":
+                continue
+            kind, value = known.get(r["instance"], (None, None))
+            if kind is None or r["status"] not in SOLVED:
+                unknown += kind is None
+                continue
+            if kind == "inf":
+                ok = r["status"] == "infeasible"
+            elif kind == "opt" and r["status"] == "optimal":
+                ok = abs(r["objective"] - value) <= 2 * gap * max(1.0, abs(value))
+            else:
+                continue
+            correct += ok
+            wrong += not ok
+            if not ok:
+                print(f"  WRONG {r['instance']}: samaya {r['status']} {r['objective']} vs "
+                      f"known {kind} {value}")
+        print(f"Known solutions: {correct} solved correctly, {wrong} wrong, "
+              f"{unknown} not in {args.solu.name}")
     for solver in solvers:
         mine = [r for r in rows if r["solver"] == solver]
         solved = [r for r in mine if r["status"] in SOLVED]

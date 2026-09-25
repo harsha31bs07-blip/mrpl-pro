@@ -17,8 +17,10 @@ for the architecture, algorithms, benchmarks and timeline.
 | Primal simplex (Devex) for cleanup and unboundedness | done |
 | Warm start from a given basis; cleanup of unscaled infeasibilities | done |
 | Independent verifier: optimality, Farkas certificates, unbounded rays | done |
-| Presolve, hyper-sparse solves, barrier, PDLP (CPU + GPU) | phase 2–3 |
-| Branch-and-cut (MILP), QP | phase 3–4 |
+| LP presolve + postsolve (primal and dual), verified on the original model | done |
+| Hyper-sparse solves, barrier, PDLP (CPU + GPU) | phase 2–3 |
+| MILP branch-and-bound: warm-started dual simplex, propagation, reliability branching, plunging, rounding heuristics | done |
+| Cutting planes (MILP), QP | phase 3–4 |
 
 **Netlib: all 93 feasible instances solved, every objective matching HiGHS; 28 of the 29
 infeasible instances proven infeasible with a verified Farkas certificate** (the remaining one,
@@ -27,7 +29,7 @@ results and timings: [docs/results/netlib.md](docs/results/netlib.md).
 
 LP models are solved by the dual simplex. Every optimal solution, infeasibility certificate and
 unbounded ray is checked by the independent verifier before it is reported; an outcome that does
-not verify becomes `numerical_error`. MILP and QP models return `not_implemented` for now.
+not verify becomes `numerical_error`. MILP models are solved by branch-and-bound; the returned solution is checked against the original model (bounds, rows, integrality). QP models return `not_implemented` for now.
 
 ## Build
 
@@ -83,6 +85,8 @@ src/core/       model, solver dispatch, status, logging, C API
 src/io/         file readers
 src/linalg/     sparse matrices, scaling, basis LU with Forrest–Tomlin updates
 src/lp/         dual and primal simplex, LP driver (scaling, unscaling)
+src/presolve/   LP/MILP presolve and postsolve
+src/mip/        branch-and-bound
 src/verify/     independent solution and certificate checks
 apps/cli/       samaya command-line tool
 tests/          unit tests (self-contained framework), dense reference solvers, random LP
@@ -90,4 +94,4 @@ tests/          unit tests (self-contained framework), dense reference solvers, 
 bench/          benchmark harness, instance generator and download script
 ```
 
-Later phases add `src/presolve`, `src/qp`, `src/mip` and `src/gpu`, as described in PLAN.md §3.
+Later phases add `src/qp` and `src/gpu`, as described in PLAN.md §3.
