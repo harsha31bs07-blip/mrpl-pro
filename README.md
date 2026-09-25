@@ -4,7 +4,8 @@ A sovereign LP / MILP / QP optimization solver core, built from mathematical fou
 SIH problem statement 26119 (MRPL). No external solver library is used. See [PLAN.md](PLAN.md)
 for the architecture, algorithms, benchmarks and timeline, and
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how the code fits together and the open work
-packages (PDLP, GPU, barrier, QP, case studies).
+packages (PDLP, GPU, barrier, QP, case studies). New to the project? Start with
+[docs/ONBOARDING.md](docs/ONBOARDING.md): machine setup, build, and the Git/pull-request workflow.
 
 ## Status
 
