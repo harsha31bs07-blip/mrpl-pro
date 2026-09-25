@@ -14,11 +14,13 @@ namespace samaya {
 namespace {
 
 // Budgets. Root dives and the pump may use this multiple of the root LP's iterations (at least
-// the minimum); tree dives start every kDiveFrequency nodes while all heuristic LP iterations
-// stay below kTreeIterationFraction of the node LP iterations plus kTreeIterationBase.
+// the minimum). Tree dives start every kDiveFrequency nodes, backing off to kMaxDiveInterval
+// while they fail, as long as all heuristic LP iterations stay below kTreeIterationFraction of
+// the node LP iterations plus kTreeIterationBase.
 constexpr double kRootIterationFactor = 1.0;
 constexpr long long kMinHeuristicIterations = 1000;
 constexpr long long kDiveFrequency = 10;
+constexpr long long kMaxDiveInterval = 1000;
 constexpr double kTreeIterationFraction = 0.1;
 constexpr long long kTreeIterationBase = 5000;
 // Feasibility pump: iterations, decay of the original objective's weight, and the number of
@@ -73,7 +75,7 @@ void BranchAndBound::run_heuristics(const Node& node, const std::vector<double>&
              outcome_.heuristic_lp_iterations - used, timer_.seconds());
     return;
   }
-  if (outcome_.nodes % kDiveFrequency == 0) {
+  if (outcome_.nodes >= next_dive_node_) {
     const double node_iterations =
         static_cast<double>(outcome_.lp_iterations - outcome_.heuristic_lp_iterations);
     const long long allowed = kTreeIterationBase +
@@ -82,8 +84,15 @@ void BranchAndBound::run_heuristics(const Node& node, const std::vector<double>&
     if (allowed > 0) {
       DiveRule rule = static_cast<DiveRule>(next_dive_rule_++ % 4);
       if (rule == DiveRule::kGuided && incumbent_.empty()) rule = DiveRule::kFractional;
+      const int before = outcome_.heuristic_solutions;
       dive(rule, x, basis, allowed);
+      // Back off after dives that find nothing: the interval doubles up to the maximum and a
+      // success resets it.
+      dive_interval_ = outcome_.heuristic_solutions > before
+                           ? kDiveFrequency
+                           : std::min(kMaxDiveInterval, 2 * dive_interval_);
     }
+    next_dive_node_ = outcome_.nodes + dive_interval_;
   }
   if (options_.sub_mip_heuristics && !incumbent_.empty() && outcome_.nodes >= next_rins_node_ &&
       incumbent_value_ < rins_incumbent_) {
@@ -338,6 +347,7 @@ void BranchAndBound::sub_mip(const std::vector<double>& lower, const std::vector
     options.time_limit = seconds - timer.seconds();
     options.node_limit = kSubMipNodes;
     options.sub_mip_heuristics = false;
+    options.threads = 1;
     options.debug_solution.clear();
     options.objective_cutoff.reset();
     if (!incumbent_.empty()) options.objective_cutoff = sense_ * cutoff();

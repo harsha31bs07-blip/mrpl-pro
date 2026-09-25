@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <string>
+#include <thread>
 
 #include "core/log.hpp"
 #include "lp/lp_solver.hpp"
@@ -215,6 +216,9 @@ void solve_mip_model(const Model& model, const Params& params, const Logger& log
     options.rel_gap = params.mip_rel_gap;
     options.abs_gap = params.mip_abs_gap;
     options.integrality_tol = params.integrality_tol;
+    options.threads = params.threads > 0
+                          ? params.threads
+                          : std::max(1, static_cast<int>(std::thread::hardware_concurrency()));
     BranchAndBound search(work, options, log);
     outcome = search.solve();
   }

@@ -461,6 +461,72 @@ TEST(mip_cuts_on_fixed_charge_models) {
   CHECK(tightened > models / 2);
 }
 
+TEST(mip_parallel_search_matches_reference) {
+  // Four threads from the first node (no sequential ramp-up) on the random families: the
+  // parallel search must reach the same optimum and status as the reference.
+  const samaya::Logger quiet(0);
+  int failures = 0;
+  int models = 0;
+  int parallel = 0;
+  for (const MilpFamily family : {MilpFamily::kMixed, MilpFamily::kPureInteger,
+                                  MilpFamily::kKnapsack, MilpFamily::kEquality}) {
+    std::mt19937 rng(300 + static_cast<unsigned>(family));
+    for (int k = 0; k < 120; ++k) {
+      const Model model = random_milp(family, rng);
+      const ReferenceMilpResult ref = samaya::test::reference_milp(model);
+      if (ref.status == ReferenceMilpResult::Status::kNodeLimit) continue;
+      samaya::MipOptions options;
+      options.rel_gap = 0.0;
+      options.abs_gap = 1e-9;
+      options.threads = 4;
+      options.parallel_start_nodes = 0;
+      options.cuts = k % 2 == 0;
+      const samaya::MipOutcome out = samaya::BranchAndBound(model, options, quiet).solve();
+      ++models;
+      parallel += out.threads_used > 1;
+      bool ok = false;
+      if (ref.status == ReferenceMilpResult::Status::kOptimal) {
+        ok = out.status == Status::kOptimal &&
+             std::fabs(out.objective - ref.objective) <= 1e-6 * (1 + std::fabs(ref.objective)) &&
+             std::fabs(out.bound - out.objective) <= 1e-6 * (1 + std::fabs(ref.objective));
+      } else {
+        ok = out.status == Status::kInfeasible;
+      }
+      if (!ok) {
+        ++failures;
+        std::fprintf(stderr, "  %s #%d: reference %d %.9g, parallel %s %.9g bound %.9g\n",
+                     name(family), k, static_cast<int>(ref.status), ref.objective,
+                     samaya::to_string(out.status), out.objective, out.bound);
+      }
+    }
+  }
+  // Harder models, so that the threads actually share a pool: set partitioning with a node limit
+  // high enough to finish.
+  std::mt19937 rng(77);
+  int agree = 0;
+  int compared = 0;
+  for (int k = 0; k < 6; ++k) {
+    const Model model = set_partitioning(rng);
+    samaya::MipOptions options;
+    options.rel_gap = 0.0;
+    options.abs_gap = 1e-9;
+    options.parallel_start_nodes = 0;
+    const samaya::MipOutcome one = samaya::BranchAndBound(model, options, quiet).solve();
+    options.threads = 4;
+    const samaya::MipOutcome four = samaya::BranchAndBound(model, options, quiet).solve();
+    if (one.status != Status::kOptimal) continue;
+    ++compared;
+    agree += four.status == Status::kOptimal &&
+             std::fabs(four.objective - one.objective) <= 1e-6 * (1 + std::fabs(one.objective));
+  }
+  std::printf("  %d random models (%d searched in parallel), %d failures; set partitioning %d/%d "
+              "agree\n", models, parallel, failures, agree, compared);
+  CHECK_EQ(failures, 0);
+  CHECK(models > 400);
+  CHECK(parallel > 50);
+  CHECK_EQ(agree, compared);
+}
+
 TEST(mip_random_models_match_reference_without_cuts) {
   std::mt19937 rng(21);
   samaya::Params params;

@@ -1,6 +1,7 @@
 #include "mip/branch_and_bound.hpp"
 
 #include "mip/cuts.hpp"
+#include "mip/search_constants.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -25,10 +26,6 @@ constexpr long long kRoundAndSolveFrequency = 50;
 constexpr long long kRoundAndSolveIterations = 2000;
 // Primal and dual tolerance of the re-solve that repairs a rounded solution.
 constexpr double kTightPrimalTol = 1e-9;
-// Without an incumbent a plunge dives this deep; with one it continues while the child's bound
-// stays within this fraction of the gap above the best open bound.
-constexpr int kMaxPlungeDepth = 1000;
-constexpr double kPlungeGapFraction = 0.3;
 // Stored warm-start bases may use at most this many bytes; beyond it nodes start from the root
 // basis.
 constexpr double kBasisMemoryBudget = 256.0 * 1024 * 1024;
@@ -213,7 +210,8 @@ double BranchAndBound::best_bound(double extra) const {
 }
 
 double BranchAndBound::remaining_time() const {
-  const double stored = static_cast<double>(open_.size() + dive_stack_.size());
+  const double stored =
+      static_cast<double>(open_.size() + dive_stack_.size() + shared_stored_);
   return options_.time_limit - timer_.seconds() - kReleaseSecondsPerNode * stored;
 }
 
@@ -391,6 +389,7 @@ bool BranchAndBound::try_solution(std::vector<double> x) {
   if (!improves(value)) return false;
   incumbent_value_ = value;
   incumbent_ = std::move(x);
+  if (shared_ != nullptr) publish_incumbent();
   log_.log(2, "mip: new incumbent %.12g after %lld nodes, %.2f s", sense_ * value,
            outcome_.nodes, timer_.seconds());
   // Prune open nodes the incumbent cuts off.
@@ -756,11 +755,11 @@ Index BranchAndBound::select_branching(const std::vector<Index>& fractional,
         } else if (st == SimplexStatus::kOptimal || st == SimplexStatus::kIterationLimit) {
           const double child = relaxation_objective();
           gain[d] = std::max(0.0, child - objective);
-          if (st == SimplexStatus::kOptimal && effective_bound(child) >= cutoff()) {
-            cut[d] = true;
-          } else {
-            record_pseudocost(j, d == 1, gain[d], distance);
-          }
+          // Record the gain even when the child is cut off: otherwise, once a good incumbent
+          // exists, such columns never become reliable and are strong-branched at every node
+          // (mas76: 25k strong-branching LPs instead of 1.5k).
+          record_pseudocost(j, d == 1, gain[d], distance);
+          if (st == SimplexStatus::kOptimal && effective_bound(child) >= cutoff()) cut[d] = true;
         } else {
           gain[d] = pseudocost(j, d == 1) * distance;
         }
@@ -1002,6 +1001,14 @@ MipOutcome BranchAndBound::solve() {
       break;
     }
 
+    if (options_.threads > 1 && outcome_.nodes >= options_.parallel_start_nodes &&
+        !open_.empty()) {
+      open_.emplace(current->bound, std::move(*current));
+      current.reset();
+      run_parallel(unbounded, stopped, gap_closed);
+      break;
+    }
+
     ++outcome_.nodes;
     std::vector<Node> children;
     const NodeResult result = process_node(*current, children);
@@ -1041,10 +1048,11 @@ MipOutcome BranchAndBound::solve() {
     open_.emplace(other.bound, std::move(other));
     bool keep = false;
     if (incumbent_value_ == kInf) {
-      keep = next.depth < kMaxPlungeDepth;
+      keep = next.depth < search::kMaxPlungeDepth;
     } else {
       const double best = open_.empty() ? next.bound : open_.begin()->first;
-      keep = effective_bound(next.bound) <= best + kPlungeGapFraction * (incumbent_value_ - best);
+      keep = effective_bound(next.bound) <=
+             best + search::kPlungeGapFraction * (incumbent_value_ - best);
     }
     if (keep) {
       current = std::move(next);

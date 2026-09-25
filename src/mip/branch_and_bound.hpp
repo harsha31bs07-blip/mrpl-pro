@@ -38,6 +38,12 @@ struct MipOptions {
   // Primal heuristics: feasibility pump, diving, and the RENS/RINS sub-MIPs (solved by a nested
   // search on a presolved copy; a nested search never starts sub-MIPs itself).
   bool heuristics = true;
+  // Tree search threads. The search starts sequentially; once it has processed
+  // parallel_start_nodes nodes and the tree is still open, the open nodes go to a shared pool
+  // served by this many threads, each with its own copy of the LP (the root, its cuts and
+  // bounds are shared). The run is then not deterministic. 1 keeps the sequential search.
+  int threads = 1;
+  long long parallel_start_nodes = 200;
   // Root reductions for integer columns: coefficient tightening and probing on binaries.
   bool probing = true;
   bool sub_mip_heuristics = true;
@@ -64,6 +70,7 @@ struct MipOutcome {
   int probing_fixed = 0;
   int probing_tightened = 0;
   long long heuristic_lp_iterations = 0;  // Diving and feasibility-pump LPs (part of lp_iterations).
+  int threads_used = 1;
   int cut_rounds = 0;
   int cuts_added = 0;             // Cuts in the LP after the root (non-binding ones removed).
   double root_bound = -kInf;      // Root LP bound before and after cuts, in the model's sense.
@@ -123,6 +130,14 @@ class BranchAndBound {
   SimplexStatus solve_relaxation(const std::vector<VarStatus>* start, long long iteration_limit);
   double relaxation_objective() const;
   std::vector<VarStatus> current_basis() const;
+
+  // Parallel tree search (parallel.cpp).
+  struct Shared;
+  void run_parallel(bool& unbounded, bool& stopped, bool& gap_closed);
+  void adopt(const BranchAndBound& master, int id);
+  void worker_loop(Shared& shared);
+  void publish_incumbent();
+  void pull_incumbent();
 
   // Root reductions (probing.cpp).
   int tighten_coefficients();
@@ -222,9 +237,17 @@ class BranchAndBound {
   std::vector<BoundChange> undo_log_;
   bool logging_undo_ = false;
   int next_dive_rule_ = 0;
+  long long next_dive_node_ = 0;
+  long long dive_interval_ = 10;
   long long next_rins_node_ = 0;
   double rins_incumbent_ = kInf;
   std::mt19937 rng_{12345};
+
+  // Parallel search: the shared pool (null when sequential), this worker's index and the pool
+  // size last seen (for the time reserve).
+  Shared* shared_ = nullptr;
+  int worker_id_ = 0;
+  std::size_t shared_stored_ = 0;
 };
 
 }  // namespace samaya
