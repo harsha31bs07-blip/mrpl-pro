@@ -1,7 +1,10 @@
 #include "mip/branch_and_bound.hpp"
 
+#include "mip/cuts.hpp"
+
 #include <algorithm>
 #include <cmath>
+#include <numeric>
 #include <optional>
 #include <utility>
 
@@ -25,6 +28,11 @@ constexpr double kBasisMemoryBudget = 256.0 * 1024 * 1024;
 constexpr int kMaxTightenRounds = 5;
 // Propagation stops after this many row visits per call and ignores huge derived bounds.
 constexpr double kMaxDerivedBound = 1e12;
+// Cut selection and the root cut loop.
+constexpr double kMinCutEfficacy = 1e-5;
+constexpr double kMaxCutParallelism = 0.995;
+constexpr double kCutStallImprovement = 1e-4;  // Relative bound gain that counts as progress.
+constexpr int kCutStallRounds = 3;
 
 }  // namespace
 
@@ -34,9 +42,9 @@ BranchAndBound::BranchAndBound(const Model& model, const MipOptions& options, co
       log_(log),
       m_(model.num_rows()),
       n_(model.num_cols()),
+      original_rows_(model.num_rows()),
       sense_(model.sense == ObjSense::kMaximize ? -1.0 : 1.0),
-      offset_(sense_ * model.obj_offset),
-      At_(model.A.transpose()) {
+      offset_(sense_ * model.obj_offset) {
   cost_.resize(static_cast<std::size_t>(n_));
   integral_objective_ = true;
   bool any_cost = false;
@@ -72,34 +80,43 @@ BranchAndBound::BranchAndBound(const Model& model, const MipOptions& options, co
     }
   }
 
-  scaling_ = compute_scaling(model.A);
+  root_lower_ = model.col_lower;
+  root_upper_ = model.col_upper;
+  lower_ = root_lower_;
+  upper_ = root_upper_;
+  is_touched_.assign(static_cast<std::size_t>(n_), 0);
+  x_.assign(static_cast<std::size_t>(n_), 0.0);
+  for (int d = 0; d < 2; ++d) {
+    pc_sum_[d].assign(static_cast<std::size_t>(n_), 0.0);
+    pc_count_[d].assign(static_cast<std::size_t>(n_), 0);
+  }
+  build_relaxation();
+}
+
+// (Re)builds the scaled LP, its simplex and the row-wise matrix from model_ and the current
+// column bounds; called at construction and whenever cuts change the rows.
+void BranchAndBound::build_relaxation() {
+  m_ = model_.num_rows();
+  At_ = model_.A.transpose();
+  row_mark_.assign(static_cast<std::size_t>(m_), 0);
+  scaling_ = compute_scaling(model_.A);
+  lp_ = LpProblem{};
   lp_.m = m_;
   lp_.n = n_;
-  lp_.A = scaling_.apply(model.A);
+  lp_.A = scaling_.apply(model_.A);
   lp_.At = lp_.A.transpose();
   const auto nt = static_cast<std::size_t>(n_ + m_);
   lp_.cost.assign(nt, 0.0);
   lp_.lower.resize(nt);
   lp_.upper.resize(nt);
-  for (Index j = 0; j < n_; ++j) lp_.cost[j] = cost_[j] * scaling_.col[j];
-  for (Index i = 0; i < m_; ++i) {
-    lp_.lower[n_ + i] = model.row_lower[i] * scaling_.row[i];
-    lp_.upper[n_ + i] = model.row_upper[i] * scaling_.row[i];
-  }
-  root_lower_ = model.col_lower;
-  root_upper_ = model.col_upper;
-  lower_ = root_lower_;
-  upper_ = root_upper_;
   for (Index j = 0; j < n_; ++j) {
+    lp_.cost[j] = cost_[j] * scaling_.col[j];
     lp_.lower[j] = lower_[j] / scaling_.col[j];
     lp_.upper[j] = upper_[j] / scaling_.col[j];
   }
-  is_touched_.assign(static_cast<std::size_t>(n_), 0);
-  row_mark_.assign(static_cast<std::size_t>(m_), 0);
-  x_.assign(static_cast<std::size_t>(n_), 0.0);
-  for (int d = 0; d < 2; ++d) {
-    pc_sum_[d].assign(static_cast<std::size_t>(n_), 0.0);
-    pc_count_[d].assign(static_cast<std::size_t>(n_), 0);
+  for (Index i = 0; i < m_; ++i) {
+    lp_.lower[n_ + i] = model_.row_lower[i] * scaling_.row[i];
+    lp_.upper[n_ + i] = model_.row_upper[i] * scaling_.row[i];
   }
   simplex_ = std::make_unique<Simplex>(lp_, SimplexOptions{}, lp_log_);
 }
@@ -129,7 +146,14 @@ void BranchAndBound::apply_node_bounds(const Node& node) {
     is_touched_[j] = 0;
   }
   touched_.clear();
-  for (const BoundChange& c : node.path) set_bound(c.col, c.lower, c.upper);
+  std::vector<const PathSegment*> segments;
+  for (const PathSegment* seg = node.path.get(); seg != nullptr; seg = seg->parent.get()) {
+    segments.push_back(seg);
+  }
+  for (auto it = segments.rbegin(); it != segments.rend(); ++it) {
+    for (const BoundChange& c : (*it)->changes) set_bound(c.col, c.lower, c.upper);
+  }
+  for (const BoundChange& c : node.local) set_bound(c.col, c.lower, c.upper);
 }
 
 SimplexStatus BranchAndBound::solve_relaxation(const std::vector<VarStatus>* start,
@@ -324,7 +348,8 @@ bool BranchAndBound::try_solution(std::vector<double> x) {
   }
   std::vector<double> activity(static_cast<std::size_t>(m_), 0.0);
   model_.A.multiply(x, activity);
-  for (Index i = 0; i < m_; ++i) {
+  // Only the model's own rows: a solution is never rejected because of a cut's round-off.
+  for (Index i = 0; i < original_rows_; ++i) {
     const double rl = model_.row_lower[i];
     const double ru = model_.row_upper[i];
     if (activity[i] < rl - tol * (1.0 + std::fabs(rl)) ||
@@ -387,6 +412,226 @@ void BranchAndBound::round_and_solve(const std::vector<double>& x,
   for (std::size_t k = 0; k < integers_.size(); ++k) {
     set_bound(integers_[k], saved[k].first, saved[k].second);
   }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Cuts
+
+void BranchAndBound::remove_rows(const std::vector<Index>& rows) {
+  if (rows.empty()) return;
+  std::vector<Index> new_index(static_cast<std::size_t>(m_), 0);
+  for (const Index i : rows) new_index[i] = -1;
+  Index next = 0;
+  for (Index i = 0; i < m_; ++i) {
+    if (new_index[i] < 0) continue;
+    new_index[i] = next;
+    model_.row_lower[next] = model_.row_lower[i];
+    model_.row_upper[next] = model_.row_upper[i];
+    ++next;
+  }
+  model_.row_lower.resize(static_cast<std::size_t>(next));
+  model_.row_upper.resize(static_cast<std::size_t>(next));
+  model_.row_names.clear();
+  std::vector<Triplet> t;
+  const auto start = model_.A.col_start();
+  const auto index = model_.A.row_index();
+  const auto val = model_.A.values();
+  for (Index j = 0; j < n_; ++j) {
+    for (NnzIndex p = start[j]; p < start[j + 1]; ++p) {
+      if (new_index[index[p]] >= 0) t.push_back({new_index[index[p]], j, val[p]});
+    }
+  }
+  model_.A = SparseMatrix::from_triplets(next, n_, std::move(t));
+}
+
+int BranchAndBound::separate_and_add_cuts() {
+  const std::vector<double> x = x_;
+  const CutContext ctx{model_, At_, lower_, upper_, x, original_rows_};
+  std::vector<Cut> candidates;
+
+  // Gomory mixed-integer cuts from the rows of fractional basic integer columns, most fractional
+  // first. The scaled tableau row is mapped to original units: structural j gets
+  // a_j col_k / col_j, the logical of row i a_{n+i} col_k row_i.
+  const std::vector<Index>& basic = simplex_->basic();
+  const std::vector<VarStatus> status = simplex_->status();
+  std::vector<std::pair<double, Index>> rows;
+  for (Index r = 0; r < m_; ++r) {
+    const Index k = basic[r];
+    if (k >= n_ || model_.col_type[k] != VarType::kInteger || !is_fractional(x[k])) continue;
+    rows.emplace_back(std::fabs(x[k] - std::floor(x[k]) - 0.5), r);
+  }
+  std::sort(rows.begin(), rows.end());
+  if (rows.size() > 2 * static_cast<std::size_t>(options_.max_cuts_per_round)) {
+    rows.resize(2 * static_cast<std::size_t>(options_.max_cuts_per_round));
+  }
+  std::vector<double> scaled_row;
+  std::vector<double> row(static_cast<std::size_t>(n_ + m_));
+  for (const auto& [score, r] : rows) {
+    const Index k = basic[r];
+    simplex_->tableau_row(r, scaled_row);
+    const double ck = scaling_.col[k];
+    for (Index j = 0; j < n_; ++j) row[j] = scaled_row[j] * ck / scaling_.col[j];
+    for (Index i = 0; i < m_; ++i) row[n_ + i] = scaled_row[n_ + i] * ck * scaling_.row[i];
+    Cut cut;
+    if (gomory_mixed_integer_cut(ctx, k, row, status, cut) && finalize_cut(ctx, cut)) {
+      candidates.push_back(std::move(cut));
+    }
+  }
+  separate_mir(ctx, candidates);
+  separate_knapsack_covers(ctx, candidates);
+
+  // Select the most efficacious cuts, skipping near-parallel ones.
+  for (Cut& c : candidates) {
+    std::vector<std::size_t> order(c.index.size());
+    std::iota(order.begin(), order.end(), 0);
+    std::sort(order.begin(), order.end(),
+              [&](std::size_t a, std::size_t b) { return c.index[a] < c.index[b]; });
+    Cut sorted;
+    for (const std::size_t k : order) {
+      sorted.index.push_back(c.index[k]);
+      sorted.value.push_back(c.value[k]);
+    }
+    c.index = std::move(sorted.index);
+    c.value = std::move(sorted.value);
+  }
+  std::sort(candidates.begin(), candidates.end(),
+            [](const Cut& a, const Cut& b) { return a.efficacy > b.efficacy; });
+  const auto norm = [](const Cut& c) {
+    double s = 0.0;
+    for (const double v : c.value) s += v * v;
+    return std::sqrt(s);
+  };
+  const auto cosine = [&](const Cut& a, const Cut& b) {
+    double dot = 0.0;
+    std::size_t p = 0;
+    std::size_t q = 0;
+    while (p < a.index.size() && q < b.index.size()) {
+      if (a.index[p] == b.index[q]) {
+        dot += a.value[p++] * b.value[q++];
+      } else if (a.index[p] < b.index[q]) {
+        ++p;
+      } else {
+        ++q;
+      }
+    }
+    return dot / (norm(a) * norm(b));
+  };
+  std::vector<const Cut*> chosen;
+  for (const Cut& c : candidates) {
+    if (static_cast<int>(chosen.size()) >= options_.max_cuts_per_round) break;
+    if (c.efficacy < kMinCutEfficacy) break;
+    if (std::any_of(chosen.begin(), chosen.end(),
+                    [&](const Cut* o) { return cosine(c, *o) > kMaxCutParallelism; })) {
+      continue;
+    }
+    chosen.push_back(&c);
+  }
+  if (chosen.empty()) return 0;
+
+  if (!options_.debug_solution.empty()) {
+    for (const Cut* c : chosen) {
+      double activity = 0.0;
+      for (std::size_t k = 0; k < c->index.size(); ++k) {
+        activity += c->value[k] * options_.debug_solution[c->index[k]];
+      }
+      if (activity < c->lower - 1e-6 * (1.0 + std::fabs(c->lower))) {
+        ++outcome_.debug_cut_violations;
+        log_.log(1, "mip: cut separates the debug solution (%.9g < %.9g)", activity, c->lower);
+      }
+    }
+  }
+
+  // Append the cuts as rows  lower <= pi'x <= +inf.
+  std::vector<Triplet> t;
+  const auto start = model_.A.col_start();
+  const auto index = model_.A.row_index();
+  const auto val = model_.A.values();
+  for (Index j = 0; j < n_; ++j) {
+    for (NnzIndex p = start[j]; p < start[j + 1]; ++p) t.push_back({index[p], j, val[p]});
+  }
+  Index row_id = m_;
+  for (const Cut* c : chosen) {
+    for (std::size_t k = 0; k < c->index.size(); ++k) t.push_back({row_id, c->index[k], c->value[k]});
+    model_.row_lower.push_back(c->lower);
+    model_.row_upper.push_back(kInf);
+    ++row_id;
+  }
+  model_.row_names.clear();
+  model_.A = SparseMatrix::from_triplets(row_id, n_, std::move(t));
+  return static_cast<int>(chosen.size());
+}
+
+void BranchAndBound::root_cut_loop() {
+  if (!options_.cuts || integers_.empty()) return;
+  if (solve_relaxation(nullptr, -1) != SimplexStatus::kOptimal) return;
+  double bound = relaxation_objective();
+  outcome_.root_bound = sense_ * bound;
+  int stalls = 0;
+  for (int round = 0; round < options_.max_cut_rounds && !time_up(); ++round) {
+    if (std::none_of(integers_.begin(), integers_.end(),
+                     [&](Index j) { return is_fractional(x_[j]); })) {
+      break;
+    }
+    std::vector<VarStatus> basis = simplex_->status();
+    const Index old_m = m_;
+    const int added = separate_and_add_cuts();
+    if (added == 0) break;
+    basis.insert(basis.end(), static_cast<std::size_t>(added), VarStatus::kBasic);
+    build_relaxation();
+    if (solve_relaxation(&basis, -1) != SimplexStatus::kOptimal) {
+      // Numerical trouble with this round's cuts: drop them.
+      std::vector<Index> added_rows;
+      for (Index i = old_m; i < m_; ++i) added_rows.push_back(i);
+      remove_rows(added_rows);
+      build_relaxation();
+      basis.resize(basis.size() - static_cast<std::size_t>(added));
+      solve_relaxation(&basis, -1);
+      break;
+    }
+    ++outcome_.cut_rounds;
+    const double next = relaxation_objective();
+    if (next - bound <= kCutStallImprovement * std::max(1.0, std::fabs(bound))) {
+      if (++stalls >= kCutStallRounds) {
+        bound = next;
+        break;
+      }
+    } else {
+      stalls = 0;
+    }
+    bound = next;
+  }
+
+  // Keep only the cuts that are binding at the final root LP.
+  if (lp_status_ == SimplexStatus::kOptimal && m_ > original_rows_) {
+    std::vector<double> activity(static_cast<std::size_t>(m_), 0.0);
+    model_.A.multiply(x_, activity);
+    std::vector<Index> slack_rows;
+    for (Index i = original_rows_; i < m_; ++i) {
+      const double lo = model_.row_lower[i];
+      if (activity[i] > lo + 1e-6 * (1.0 + std::fabs(lo))) slack_rows.push_back(i);
+    }
+    if (!slack_rows.empty()) {
+      std::vector<VarStatus> basis = simplex_->status();
+      std::vector<VarStatus> kept;
+      std::vector<char> drop(static_cast<std::size_t>(m_), 0);
+      for (const Index i : slack_rows) drop[i] = 1;
+      for (Index v = 0; v < n_ + m_; ++v) {
+        if (v >= n_ && drop[v - n_]) continue;
+        kept.push_back(basis[v]);
+      }
+      remove_rows(slack_rows);
+      build_relaxation();
+      solve_relaxation(&kept, -1);
+    }
+  }
+  outcome_.cuts_added = m_ - original_rows_;
+  if (lp_status_ == SimplexStatus::kOptimal) {
+    root_basis_ = simplex_->status();
+    outcome_.root_bound_cuts = sense_ * relaxation_objective();
+  }
+  log_.log(1, "MIP root bound %.10g -> %.10g after %d cut rounds, %d cuts kept",
+           outcome_.root_bound, outcome_.root_bound_cuts, outcome_.cut_rounds,
+           outcome_.cuts_added);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -476,7 +721,7 @@ Index BranchAndBound::select_branching(const std::vector<Index>& fractional,
 
 BranchAndBound::NodeResult BranchAndBound::process_node(Node& node, std::vector<Node>& children) {
   apply_node_bounds(node);
-  if (node.branch_col >= 0 && !propagate({node.branch_col}, &node.path)) {
+  if (node.branch_col >= 0 && !propagate({node.branch_col}, &node.local)) {
     return NodeResult::kPruned;
   }
   std::shared_ptr<const std::vector<VarStatus>> start = node.basis;
@@ -538,8 +783,8 @@ BranchAndBound::NodeResult BranchAndBound::process_node(Node& node, std::vector<
     if (infeasible) return NodeResult::kPruned;
     if (has_tighten && round < kMaxTightenRounds) {
       set_bound(tighten.col, tighten.lower, tighten.upper);
-      node.path.push_back(tighten);
-      if (!propagate({tighten.col}, &node.path)) return NodeResult::kPruned;
+      node.local.push_back(tighten);
+      if (!propagate({tighten.col}, &node.local)) return NodeResult::kPruned;
       start = basis;
       continue;
     }
@@ -557,14 +802,18 @@ BranchAndBound::NodeResult BranchAndBound::process_node(Node& node, std::vector<
     Node down;
     down.bound = node.bound;
     down.depth = node.depth + 1;
-    down.path = node.path;
-    down.path.push_back({j, lower_[j], std::floor(v)});
+    // The children share one segment holding this node's changes.
+    auto segment = std::make_shared<PathSegment>();
+    segment->parent = node.path;
+    segment->changes = std::move(node.local);
+    down.path = std::move(segment);
+    down.local = {{j, lower_[j], std::floor(v)}};
     down.basis = child_basis;
     down.branch_col = j;
     down.branch_up = false;
     down.branch_distance = v - std::floor(v);
     Node up = down;
-    up.path.back() = {j, std::ceil(v), upper_[j]};
+    up.local = {{j, std::ceil(v), upper_[j]}};
     up.branch_up = true;
     up.branch_distance = std::ceil(v) - v;
     children.push_back(std::move(down));
@@ -586,6 +835,7 @@ MipOutcome BranchAndBound::solve() {
   root_upper_ = upper_;
   for (const Index j : touched_) is_touched_[j] = 0;
   touched_.clear();
+  root_cut_loop();
 
   std::optional<Node> current = Node{};
   bool unbounded = false;
@@ -613,7 +863,11 @@ MipOutcome BranchAndBound::solve() {
       gap_closed = true;
       break;
     }
-    if (time_up() ||
+    if (open_.size() >= options_.max_open_nodes && !open_limit_logged_) {
+      open_limit_logged_ = true;
+      log_.log(1, "MIP: %zu open nodes, stopping to bound memory use", open_.size());
+    }
+    if (time_up() || open_.size() >= options_.max_open_nodes ||
         (options_.node_limit >= 0 && outcome_.nodes >= options_.node_limit)) {
       open_.emplace(current->bound, std::move(*current));
       current.reset();
@@ -652,7 +906,9 @@ MipOutcome BranchAndBound::solve() {
     open_.emplace(other.bound, std::move(other));
     Node& next = children[dive];
     bool keep = false;
-    if (incumbent_value_ == kInf) {
+    if (open_.size() >= options_.max_open_nodes_soft) {
+      keep = true;  // Depth first keeps the open list from growing.
+    } else if (incumbent_value_ == kInf) {
       keep = next.depth < kMaxPlungeDepth;
     } else {
       const double best = open_.empty() ? next.bound : open_.begin()->first;
