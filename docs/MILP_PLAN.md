@@ -79,6 +79,9 @@ above, which ignores such instances.
 | + RINS time budget | 46 | 10.2% | 4 | 0 |
 | + LP speed-ups (warm-start refactorization, propagation, optimality check) | 48 | 12.0% | 5 | 0 |
 | + aggregated c-MIR with variable bounds, strong-branching cap | 47 | 9.3% | 6 | 0 |
+| + simple generalized flow covers | 46 | 12.8% | 7 | 0 |
+| + reduced-cost fixing at every node | 46 | 10.0% | 7 | 0 |
+| + restart after the root (20% of integers fixed) | 46 | 10.0% | 7 | 0 |
 
 **Done:**
 - **A1:** runs end within the time limit (the node release time is reserved).
@@ -88,6 +91,14 @@ above, which ignores such instances.
 - **A6:** parallel tree search, `--threads N`.
 - **A correctness fix:** a node whose LP point was integral only within the tolerance could be
   pruned (found by the MRPL crude case).
+
+**Next, from the per-instance analysis** ([results/comparison.md](results/comparison.md)):
+- A shifting heuristic for general integers. neos-3381206-awhea is cutting stock with general
+  integers: the pump ignores them, rounding is blocked by the equality rows, and RENS's
+  sub-problem is infeasible. HiGHS takes 8 s and SCIP 3 s.
+- Path cuts on big-M networks: p200x1188c and mc11 keep large root gaps. Flow covers help
+  sp150x300d but lower the root bound there.
+- Symmetry handling (fhnw-binpack4-4, graph20-20-1rand): not before the deadline.
 
 **Tried and dropped:**
 - Single-row variable-upper-bound substitution in c-MIR (A4): no MIPLIB root bound moved. It
