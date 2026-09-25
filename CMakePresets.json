@@ -34,7 +34,7 @@
       "name": "cuda",
       "inherits": "release",
       "displayName": "Release + CUDA",
-      "cacheVariables": { "SAMAYA_CUDA": "ON" }
+      "cacheVariables": { "SAMAYA_CUDA": "ON", "CMAKE_CUDA_ARCHITECTURES": "86" }
     }
   ],
   "buildPresets": [
@@ -46,6 +46,7 @@
   "testPresets": [
     { "name": "debug", "configurePreset": "debug", "output": { "outputOnFailure": true } },
     { "name": "release", "configurePreset": "release", "output": { "outputOnFailure": true } },
-    { "name": "asan", "configurePreset": "asan", "output": { "outputOnFailure": true } }
+    { "name": "asan", "configurePreset": "asan", "output": { "outputOnFailure": true } },
+    { "name": "cuda", "configurePreset": "cuda", "output": { "outputOnFailure": true } }
   ]
 }

@@ -1,8 +1,9 @@
 # Getting started: taking a work package with Claude Code
 
 A step-by-step guide for a teammate joining the solver work, using the Claude Code CLI (any
-model configured behind it). The worked example is **WP1, PDLP on the CPU**, the first half of
-the GPU story. The same steps apply to any package in [ARCHITECTURE.md](ARCHITECTURE.md) §6.
+model configured behind it). It covers **WP1, PDLP on the CPU** (Step 5) and then **WP2, PDLP on
+the GPU** (Step 5b): the GPU story of the problem statement. The same steps apply to any
+package in [ARCHITECTURE.md](ARCHITECTURE.md) §6.
 
 The idea: **you** own the package and the decisions; the agent writes code in small,
 test-checked steps; **you** verify every step by running the commands yourself.
@@ -173,9 +174,107 @@ Copy these one at a time. Each is small on purpose.
 
 ### After M5
 
-Open a pull request (Step 7). WP2 (the CUDA version) then reuses the M4 interface; its prompts
-follow the same pattern: kernels with CPU comparison tests first, the loop on the device
-second, benchmarks third.
+Open a pull request (Step 7), get it merged, then continue with WP2 below.
+
+## Step 5b: WP2, PDLP on the GPU (RTX 3060 laptop)
+
+### CUDA setup (once)
+
+**On Windows with WSL2** (recommended):
+1. Install the latest NVIDIA Game Ready or Studio driver **on Windows**.
+2. Inside WSL, do **not** install a Linux NVIDIA driver; the Windows driver is shared.
+3. Install only the toolkit, from NVIDIA's "WSL-Ubuntu" CUDA 12 repository (developer.nvidia.com
+   → CUDA Toolkit → Linux → x86_64 → WSL-Ubuntu), e.g. `sudo apt install cuda-toolkit-12-6`.
+
+**On native Linux:** the NVIDIA driver plus `cuda-toolkit-12-x` from NVIDIA's repository.
+
+Check:
+
+```sh
+nvidia-smi                         # shows the RTX 3060 and the driver version
+nvcc --version                     # CUDA 12.x (add /usr/local/cuda/bin to PATH if missing)
+nvidia-smi --query-gpu=name,compute_cap,memory.total --format=csv   # compute_cap 8.6
+```
+
+The `cuda` preset builds for compute capability 8.6 (`CMAKE_CUDA_ARCHITECTURES=86`); change it
+in `CMakePresets.json` if you use a different GPU. The GPU build and tests:
+
+```sh
+cmake --preset cuda && cmake --build --preset cuda && ctest --preset cuda
+```
+
+The CPU presets must keep working without CUDA installed; CI has no GPU.
+
+### WP2 milestone prompts
+
+#### G0: build wiring
+
+> Wire CUDA into the build for WP2 (docs/ARCHITECTURE.md). In `CMakeLists.txt`, inside the
+> existing `if(SAMAYA_CUDA)` block, add the sources in `src/gpu/` to the `samaya` library, link
+> `CUDA::cudart`, and define `SAMAYA_HAVE_CUDA`. Create `src/gpu/device.hpp` / `device.cu`
+> with a function `bool gpu_available()` (uses `cudaGetDeviceCount`) and a `SAMAYA_CUDA_CHECK`
+> macro that turns any CUDA error into an exception with the file, line and error string.
+> Without `SAMAYA_HAVE_CUDA`, `gpu_available()` must still exist and return false (a `.cpp`
+> stub). Add `tests/test_gpu.cpp` with one test that adds two vectors on the device and
+> compares with the CPU; when no GPU is present it prints `SKIPPED (no GPU)` and passes. Show
+> me: the `cuda` preset build and test output, and that the `debug` preset still builds and
+> passes without CUDA.
+
+#### G1: kernels
+
+> Implement the WP2 kernels in `src/gpu/`, double precision throughout: (1) CSR SpMV
+> `y = A x` with one warp per row, used for both `A` and `Aᵀ` (upload the row-wise copies
+> `LpProblem::At` and the transpose of that, so both products are row-wise); (2) fused vector
+> kernels: `axpby`, projection onto `[lower, upper]` with infinite bounds, and the PDLP primal
+> and dual update steps; (3) reductions for dot products and 2-norms (two-stage block
+> reduction, no atomics on doubles). Do **not** use cuSPARSE or cuBLAS. Tests in
+> `tests/test_gpu.cpp`: random sparse matrices (including empty rows and one very long row) and
+> vectors, every kernel compared with a CPU implementation to 1e-12 relative. Show me the test
+> output.
+
+#### G2: the PDLP loop on the device
+
+> Implement WP2 milestone M2: a GPU path in `solve_pdlp` used when
+> `PdlpOptions::use_gpu && gpu_available()`, otherwise the CPU path. Upload the problem and the
+> iterates once; keep every vector on the device during iterations; copy only the scalars
+> needed for restart and termination checks back to the host (at most once per check, not per
+> iteration). Reuse the CPU implementation's restart and step-size logic on the host. Test:
+> on 50 random LPs, run 100 iterations on the CPU and on the GPU with identical settings and
+> check the iterates agree to 1e-10 relative; then check full solves agree in status and
+> objective with the CPU path. Wire `--gpu` (already parsed into `Params::use_gpu`) to
+> `PdlpOptions::use_gpu`. Show me the test output and `nvidia-smi` during a long solve.
+
+#### G3: benchmark
+
+> Generate large LPs with `python3 bench/generate_lps.py --set lp --scale 10` and
+> `--scale 20` (write to `bench/instances/generated-large/`). Run each with
+> `--lp-method pdlp` on the CPU and with `--lp-method pdlp --gpu`, same tolerance (1e-4 and
+> 1e-6), and record: status, objective, iterations, total seconds, seconds excluding the
+> host-to-device upload, and whether the result verified. Also run the dual simplex on the same
+> models for reference. Write the table to `docs/results/gpu_pdlp.md` with the GPU name, driver
+> and CUDA version, and a one-paragraph honest summary (speedup, where the GPU does not help).
+
+### GPU red flags (reject these)
+
+- cuSPARSE/cuBLAS/cuSOLVER in the solver path (allowed only in a separate benchmark tool).
+- `float` anywhere in the solver path, or "fast math" flags.
+- Kernel launches without error checks, or `cudaDeviceSynchronize` after every kernel.
+- A host-device copy of a full vector inside the iteration loop.
+- GPU tests that silently pass without a GPU instead of printing `SKIPPED`.
+- Speedups quoted without the same tolerance, or without verified results.
+
+**What to expect on a laptop RTX 3060:** PDLP is limited by memory bandwidth (about 336 GB/s
+on the GPU against roughly 60–80 GB/s from DDR5 for the CPU), and consumer GPUs run double
+precision at a small fraction of their single-precision speed. A verified **2–4×** on large
+LPs is a good, honest result; small LPs will be faster on the CPU (launch and transfer
+overhead). Say so in the report.
+
+### Who owns what
+
+The MILP work (`src/mip/`, MILP parts of `bench/`) is being done in parallel by the lead. WP1/WP2
+own `src/lp/pdlp.*`, `src/gpu/`, the CUDA block of `CMakeLists.txt`, `tests/test_pdlp.cpp` and
+`tests/test_gpu.cpp`. Both sides touch `src/core/solver.cpp` only in small dispatch hunks:
+pull `main` before starting each milestone and rebase before opening a PR.
 
 ## Step 6: verify every step yourself
 
