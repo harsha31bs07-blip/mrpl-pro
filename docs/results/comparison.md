@@ -80,3 +80,6 @@ Solve times of every instance samaya solves (seconds; "–" = not solved in 60 s
 - Reduced-cost fixing and a root restart: mas76 from 53.6 s to 25.5 s.
 - A cap on strong-branching effort.
 - Three simplex speed-ups: a warm-started solve factorized three times, now once.
+
+After this run, the child-selection change (90f8df0) raised samaya's screening to 48 feasible
+(from 46) at the same 7 solved. The next same-machine comparison will include it.

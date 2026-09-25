@@ -82,6 +82,7 @@ above, which ignores such instances.
 | + simple generalized flow covers | 46 | 12.8% | 7 | 0 |
 | + reduced-cost fixing at every node | 46 | 10.0% | 7 | 0 |
 | + restart after the root (20% of integers fixed) | 46 | 10.0% | 7 | 0 |
+| + plunge into the child with the smaller pseudocost estimate | 48 | 9.7% | 7 | 0 |
 
 **Done:**
 - **A1:** runs end within the time limit (the node release time is reserved).
@@ -104,6 +105,10 @@ above, which ignores such instances.
 - Single-row variable-upper-bound substitution in c-MIR (A4): no MIPLIB root bound moved. It
   pays off only with multi-row aggregation, which is now in.
 - Sorted bound-flip groups in the ratio test: no measurable gain.
+- Best-estimate node selection (every 5th pick): neutral (14 better, 16 worse).
+- RENS retry with only at-bound fixings: neos-3381206-awhea's neighbourhood is still infeasible.
+- Parameter tuning on the 62 screening instances: not done on purpose. It would overfit the
+  set the results are reported on.
 - Build flags: LTO +0.5%, `-march=native` +2.5%, profile-guided optimization about +4% on mas76.
   All within noise; the time is in sparse, memory-bound code, so the build stays simple.
 
