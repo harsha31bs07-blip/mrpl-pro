@@ -71,6 +71,7 @@ struct MipOutcome {
   int probing_tightened = 0;
   long long heuristic_lp_iterations = 0;  // Diving and feasibility-pump LPs (part of lp_iterations).
   int threads_used = 1;
+  long long reduced_cost_fixings = 0;  // Column bounds tightened by reduced costs.
   int cut_rounds = 0;
   int cuts_added = 0;             // Cuts in the LP after the root (non-binding ones removed).
   double root_bound = -kInf;      // Root LP bound before and after cuts, in the model's sense.
@@ -165,6 +166,8 @@ class BranchAndBound {
   // Search.
   NodeResult process_node(Node& node, std::vector<Node>& children);
   bool propagate(std::vector<Index> changed, std::vector<BoundChange>* record);
+  void reduced_cost_fixing(Node& node, double objective, const std::vector<double>& reduced,
+                           const std::vector<VarStatus>& basis);
   Index select_branching(const std::vector<Index>& fractional, const std::vector<double>& x,
                          double objective, const std::vector<VarStatus>& basis,
                          bool& node_infeasible, BoundChange& tighten, bool& has_tighten);

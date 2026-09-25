@@ -286,6 +286,7 @@ void BranchAndBound::run_parallel(bool& unbounded, bool& stopped, bool& gap_clos
     outcome_.strong_branching_iterations += worker->outcome_.strong_branching_iterations;
     outcome_.heuristic_solutions += worker->outcome_.heuristic_solutions;
     outcome_.heuristic_lp_iterations += worker->outcome_.heuristic_lp_iterations;
+    outcome_.reduced_cost_fixings += worker->outcome_.reduced_cost_fixings;
     pruned_bound_ = std::min(pruned_bound_, worker->pruned_bound_);
     incomplete_ = incomplete_ || worker->incomplete_;
   }

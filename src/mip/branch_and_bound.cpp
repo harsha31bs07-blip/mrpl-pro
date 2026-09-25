@@ -14,6 +14,10 @@ namespace samaya {
 namespace {
 
 constexpr double kScoreFloor = 1e-6;
+// Reduced-cost fixing ignores reduced costs below this and allows this relative slack on the
+// cutoff for the LP's tolerances.
+constexpr double kReducedCostTol = 1e-7;
+constexpr double kReducedCostSlack = 1e-6;
 constexpr double kStrongIterationShare = 0.5;
 constexpr double kStrongIterationOffset = 20000.0;
 // A solution replaces the incumbent only if it is better by this much (relative).
@@ -809,6 +813,39 @@ Index BranchAndBound::select_branching(const std::vector<Index>& fractional,
   return best;
 }
 
+// Reduced-cost fixing: an integer column nonbasic at a bound with reduced cost d_j can move k
+// units into its domain only if objective + |d_j| k stays below the cutoff (LP duality), so its
+// other bound tightens to the largest such k. The changes hold in the node's subtree and are
+// recorded with the node. The current LP point stays feasible and optimal.
+void BranchAndBound::reduced_cost_fixing(Node& node, double objective,
+                                         const std::vector<double>& reduced,
+                                         const std::vector<VarStatus>& basis) {
+  const double limit = cutoff();
+  if (!(limit < kInf)) return;
+  // Slack for the LP's own tolerances, so round-off never fixes a column wrongly.
+  const double room = limit - objective + kReducedCostSlack * (1.0 + std::fabs(limit));
+  if (room < 0.0) return;
+  for (const Index j : integers_) {
+    if (lower_[j] == upper_[j]) continue;
+    const double d = reduced[j];
+    if (basis[j] == VarStatus::kAtLower && d > kReducedCostTol) {
+      const double up = lower_[j] + std::floor(room / d);
+      if (up < upper_[j]) {
+        set_bound(j, lower_[j], up);
+        node.local.push_back({j, lower_[j], up});
+        ++outcome_.reduced_cost_fixings;
+      }
+    } else if (basis[j] == VarStatus::kAtUpper && d < -kReducedCostTol) {
+      const double lo = upper_[j] - std::floor(room / -d);
+      if (lo > lower_[j]) {
+        set_bound(j, lo, upper_[j]);
+        node.local.push_back({j, lo, upper_[j]});
+        ++outcome_.reduced_cost_fixings;
+      }
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Nodes
 
@@ -844,6 +881,10 @@ BranchAndBound::NodeResult BranchAndBound::process_node(Node& node, std::vector<
     }
     node.bound = std::max(node.bound, objective);
     const std::vector<double> x = x_;
+    // The node LP's reduced costs (original units), kept for reduced-cost fixing after the
+    // heuristics, which re-solve other LPs on the same simplex.
+    std::vector<double> reduced(static_cast<std::size_t>(n_));
+    for (Index j = 0; j < n_; ++j) reduced[j] = simplex_->reduced_costs()[j] / scaling_.col[j];
     std::vector<Index> fractional;
     for (const Index j : integers_) {
       if (is_fractional(x[j])) fractional.push_back(j);
@@ -893,6 +934,7 @@ BranchAndBound::NodeResult BranchAndBound::process_node(Node& node, std::vector<
       pruned_bound_ = std::min(pruned_bound_, bound);
       return NodeResult::kPruned;
     }
+    reduced_cost_fixing(node, objective, reduced, *basis);
 
     bool infeasible = false;
     bool has_tighten = false;
