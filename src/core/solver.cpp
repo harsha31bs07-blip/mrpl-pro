@@ -5,6 +5,7 @@
 
 #include "core/log.hpp"
 #include "lp/lp_solver.hpp"
+#include "presolve/presolve.hpp"
 #include "samaya/verify.hpp"
 
 #ifndef SAMAYA_VERSION_STRING
@@ -53,12 +54,10 @@ bool verify_lp(const Model& model, const LpResult& lp, Result& result) {
 }
 
 // Solves an LP with the dual simplex. If the outcome fails verification the solve is repeated
-// with tighter tolerances and then without scaling; an outcome that never verifies is reported
-// as a numerical error rather than as a solution.
-void solve_lp_model(const Model& model, const Params& params, const Logger& log, Result& result) {
-  if (params.lp_method == LpMethod::kBarrier || params.lp_method == LpMethod::kPdlp) {
-    log.log(1, "Requested LP method not available yet; using the dual simplex");
-  }
+// with tighter tolerances and then without scaling. Returns the last outcome; `verified` says
+// whether it passed (limit statuses claim nothing and count as verified).
+LpResult solve_lp_verified(const Model& model, const Params& params, const Logger& log,
+                           Result& result, bool& verified) {
   LpSolveOptions attempts[3];
   attempts[0] = lp_options_from_params(params);
   attempts[1] = attempts[0];
@@ -69,7 +68,7 @@ void solve_lp_model(const Model& model, const Params& params, const Logger& log,
   const int num_attempts = params.verify ? 3 : 1;
 
   LpResult lp;
-  bool verified = false;
+  verified = false;
   long long iterations = 0;
   for (int a = 0; a < num_attempts; ++a) {
     lp = solve_lp(model, attempts[a], log);
@@ -79,6 +78,81 @@ void solve_lp_model(const Model& model, const Params& params, const Logger& log,
     if (verified) break;
     log.log(1, "Verification of %s result failed (%s); retrying with stricter settings",
             to_string(lp.status), result.message.c_str());
+  }
+  lp.iterations = iterations;
+  return lp;
+}
+
+// Presolves the LP, solves the reduced model and maps an optimal solution back. Returns false
+// (and leaves `lp` unspecified) when the caller should solve the original model instead: the
+// reduced model was not solved to a verified optimum, or presolve found infeasibility (the
+// original solve then produces a certificate for the original model).
+bool solve_presolved_lp(const Model& model, const Params& params, const Logger& log,
+                        Result& result, LpResult& lp, long long& iterations) {
+  Presolve presolve(model);
+  if (presolve.run() != PresolveStatus::kReduced) {
+    log.log(1, "Presolve: infeasibility detected; solving the original model for a certificate");
+    return false;
+  }
+  const Model& reduced = presolve.reduced();
+  const PresolveStats& st = presolve.stats();
+  log.log(1, "Presolve: %d rows, %d cols -> %d rows, %d cols, %lld nonzeros (%d passes)",
+          model.num_rows(), model.num_cols(), reduced.num_rows(), reduced.num_cols(),
+          static_cast<long long>(reduced.A.nnz()), st.passes);
+  log.log(2,
+          "Presolve: rows: %d empty, %d singleton, %d forcing, %d redundant, %d duplicate; "
+          "cols: %d fixed, %d empty, %d dominated, %d free singleton; %d bounds tightened",
+          st.empty_rows, st.singleton_rows, st.forcing_rows, st.redundant_rows,
+          st.duplicate_rows, st.fixed_cols, st.empty_cols, st.dominated_cols,
+          st.free_col_singletons, st.bounds_tightened);
+
+  LpResult reduced_lp;
+  if (reduced.num_cols() > 0) {
+    bool verified = false;
+    reduced_lp = solve_lp_verified(reduced, params, log, result, verified);
+    iterations += reduced_lp.iterations;
+    if (reduced_lp.status != SimplexStatus::kOptimal || !verified) {
+      log.log(1, "Presolved model: %s; solving the original model",
+              to_string(reduced_lp.status));
+      return false;
+    }
+  }
+
+  lp = LpResult{};
+  lp.status = SimplexStatus::kOptimal;
+  presolve.postsolve(reduced_lp.col_value, reduced_lp.row_dual, lp.col_value, lp.row_dual);
+  const Index n = model.num_cols();
+  const Index m = model.num_rows();
+  lp.row_activity.assign(static_cast<std::size_t>(m), 0.0);
+  model.A.multiply(lp.col_value, lp.row_activity);
+  lp.col_dual.assign(static_cast<std::size_t>(n), 0.0);
+  model.A.multiply_transpose(lp.row_dual, lp.col_dual);
+  long double objective = model.obj_offset;
+  for (Index j = 0; j < n; ++j) {
+    lp.col_dual[j] = model.obj[j] - lp.col_dual[j];
+    objective += static_cast<long double>(model.obj[j]) * lp.col_value[j];
+  }
+  lp.objective = static_cast<double>(objective);
+  if (params.verify && !verify_lp(model, lp, result)) {
+    log.log(1, "Postsolved solution failed verification (%s); solving the original model",
+            result.message.c_str());
+    return false;
+  }
+  return true;
+}
+
+void solve_lp_model(const Model& model, const Params& params, const Logger& log, Result& result) {
+  if (params.lp_method == LpMethod::kBarrier || params.lp_method == LpMethod::kPdlp) {
+    log.log(1, "Requested LP method not available yet; using the dual simplex");
+  }
+  LpResult lp;
+  long long iterations = 0;
+  bool verified = false;
+  if (params.presolve && solve_presolved_lp(model, params, log, result, lp, iterations)) {
+    verified = params.verify;
+  } else {
+    lp = solve_lp_verified(model, params, log, result, verified);
+    iterations += lp.iterations;
   }
 
   result.status = to_status(lp.status);

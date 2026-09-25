@@ -1,0 +1,548 @@
+#include "presolve/presolve.hpp"
+
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <unordered_map>
+
+namespace samaya {
+
+namespace {
+
+// A free column singleton is substituted out only if its coefficient is not tiny relative to the
+// rest of its row (as in threshold pivoting), to keep the substitution stable.
+constexpr double kSubstitutionPivotRatio = 0.01;
+// Relative tolerance for two rows being parallel.
+constexpr double kParallelTol = 1e-12;
+
+}  // namespace
+
+Presolve::Presolve(const Model& model, const PresolveOptions& options)
+    : model_(model),
+      options_(options),
+      m_(model.num_rows()),
+      n_(model.num_cols()),
+      sense_(model.sense == ObjSense::kMaximize ? -1.0 : 1.0),
+      At_(model.A.transpose()) {
+  cost_.resize(static_cast<std::size_t>(n_));
+  for (Index j = 0; j < n_; ++j) cost_[j] = sense_ * model.obj[j];
+  offset_ = sense_ * model.obj_offset;
+  lower_ = model.col_lower;
+  upper_ = model.col_upper;
+  row_lower_ = model.row_lower;
+  row_upper_ = model.row_upper;
+  row_active_.assign(static_cast<std::size_t>(m_), 1);
+  col_active_.assign(static_cast<std::size_t>(n_), 1);
+  row_count_.assign(static_cast<std::size_t>(m_), 0);
+  col_count_.assign(static_cast<std::size_t>(n_), 0);
+  const auto start = model.A.col_start();
+  const auto index = model.A.row_index();
+  for (Index j = 0; j < n_; ++j) {
+    col_count_[j] = static_cast<Index>(start[j + 1] - start[j]);
+    for (NnzIndex p = start[j]; p < start[j + 1]; ++p) ++row_count_[index[p]];
+  }
+}
+
+double Presolve::tol(double v) const {
+  return options_.feasibility_tol * (1.0 + (std::isfinite(v) ? std::fabs(v) : 0.0));
+}
+
+void Presolve::remove_row(Index i) {
+  row_active_[i] = 0;
+  ++stats_.rows_removed;
+  const auto start = At_.col_start();
+  const auto index = At_.row_index();
+  for (NnzIndex p = start[i]; p < start[i + 1]; ++p) {
+    if (col_active_[index[p]]) --col_count_[index[p]];
+  }
+}
+
+void Presolve::remove_col(Index j) {
+  col_active_[j] = 0;
+  ++stats_.cols_removed;
+  const auto start = model_.A.col_start();
+  const auto index = model_.A.row_index();
+  for (NnzIndex p = start[j]; p < start[j + 1]; ++p) {
+    if (row_active_[index[p]]) --row_count_[index[p]];
+  }
+}
+
+void Presolve::fix_col(Index j, double value) {
+  const auto start = model_.A.col_start();
+  const auto index = model_.A.row_index();
+  const auto val = model_.A.values();
+  for (NnzIndex p = start[j]; p < start[j + 1]; ++p) {
+    const Index i = index[p];
+    if (!row_active_[i]) continue;
+    if (row_lower_[i] > -kInf) row_lower_[i] -= val[p] * value;
+    if (row_upper_[i] < kInf) row_upper_[i] -= val[p] * value;
+  }
+  offset_ += cost_[j] * value;
+  remove_col(j);
+}
+
+bool Presolve::set_bounds(Index j, double lower, double upper) {
+  if (is_int(j)) {
+    if (lower > -kInf) lower = std::ceil(lower - options_.integrality_tol);
+    if (upper < kInf) upper = std::floor(upper + options_.integrality_tol);
+  }
+  lower = std::max(lower, lower_[j]);
+  upper = std::min(upper, upper_[j]);
+  if (lower > upper) {
+    if (lower > upper + tol(upper)) return false;
+    // Crossed within the tolerance: keep whichever bound was already there.
+    if (lower == lower_[j]) {
+      upper = lower;
+    } else {
+      lower = upper;
+    }
+  }
+  if (lower != lower_[j] || upper != upper_[j]) ++stats_.bounds_tightened;
+  lower_[j] = lower;
+  upper_[j] = upper;
+  return true;
+}
+
+void Presolve::activity_bounds(Index i, double& min_act, double& max_act) const {
+  min_act = 0.0;
+  max_act = 0.0;
+  const auto start = At_.col_start();
+  const auto index = At_.row_index();
+  const auto val = At_.values();
+  for (NnzIndex p = start[i]; p < start[i + 1]; ++p) {
+    const Index j = index[p];
+    if (!col_active_[j]) continue;
+    const double a = val[p];
+    if (a > 0.0) {
+      min_act += lower_[j] > -kInf ? a * lower_[j] : -kInf;
+      max_act += upper_[j] < kInf ? a * upper_[j] : kInf;
+    } else {
+      min_act += upper_[j] < kInf ? a * upper_[j] : -kInf;
+      max_act += lower_[j] > -kInf ? a * lower_[j] : kInf;
+    }
+  }
+}
+
+bool Presolve::process_rows(bool& changed) {
+  const auto start = At_.col_start();
+  const auto index = At_.row_index();
+  const auto val = At_.values();
+  for (Index i = 0; i < m_; ++i) {
+    if (!row_active_[i]) continue;
+    const double rl = row_lower_[i];
+    const double ru = row_upper_[i];
+    if (row_count_[i] == 0) {
+      if (rl > tol(rl) || ru < -tol(ru)) return false;
+      records_.push_back({.kind = Kind::kRemoveRow, .row = i});
+      remove_row(i);
+      ++stats_.empty_rows;
+      changed = true;
+      continue;
+    }
+    if (row_count_[i] == 1) {
+      NnzIndex p = start[i];
+      while (!col_active_[index[p]]) ++p;
+      const Index j = index[p];
+      const double a = val[p];
+      double lo = a > 0.0 ? rl / a : ru / a;
+      double up = a > 0.0 ? ru / a : rl / a;
+      if (std::isnan(lo)) lo = -kInf;
+      if (std::isnan(up)) up = kInf;
+      records_.push_back({.kind = Kind::kSingletonRow,
+                          .row = i,
+                          .col = j,
+                          .a = a,
+                          .cost = cost_[j],
+                          .old_lower = lower_[j],
+                          .old_upper = upper_[j]});
+      remove_row(i);
+      if (!set_bounds(j, lo, up)) return false;
+      ++stats_.singleton_rows;
+      changed = true;
+      continue;
+    }
+
+    double min_act;
+    double max_act;
+    activity_bounds(i, min_act, max_act);
+    if (min_act > ru + tol(ru) || max_act < rl - tol(rl)) return false;
+    const bool lower_redundant = rl == -kInf || min_act >= rl - tol(rl);
+    const bool upper_redundant = ru == kInf || max_act <= ru + tol(ru);
+    if (lower_redundant && upper_redundant) {
+      records_.push_back({.kind = Kind::kRemoveRow, .row = i});
+      remove_row(i);
+      ++stats_.redundant_rows;
+      changed = true;
+      continue;
+    }
+    const bool force_min = min_act > -kInf && ru < kInf && min_act >= ru - tol(ru);
+    const bool force_max = max_act < kInf && rl > -kInf && max_act <= rl + tol(rl);
+    if (force_min || force_max) {
+      // Every column sits at the bound that minimizes (maximizes) the activity.
+      Record record{.kind = Kind::kForcingRow, .row = i, .flag1 = force_min};
+      record.first = terms_.size();
+      for (NnzIndex p = start[i]; p < start[i + 1]; ++p) {
+        const Index j = index[p];
+        if (!col_active_[j]) continue;
+        const double a = val[p];
+        const double v = (a > 0.0) == force_min ? lower_[j] : upper_[j];
+        terms_.push_back({j, a, cost_[j], v, lower_[j] < upper_[j]});
+      }
+      record.last = terms_.size();
+      records_.push_back(record);
+      remove_row(i);
+      for (std::size_t t = record.first; t < record.last; ++t) {
+        fix_col(terms_[t].col, terms_[t].value);
+      }
+      ++stats_.forcing_rows;
+      changed = true;
+    }
+  }
+  return true;
+}
+
+bool Presolve::process_cols(bool& changed) {
+  const auto start = model_.A.col_start();
+  const auto index = model_.A.row_index();
+  const auto val = model_.A.values();
+  for (Index j = 0; j < n_; ++j) {
+    if (!col_active_[j]) continue;
+    if (lower_[j] == upper_[j]) {
+      records_.push_back({.kind = Kind::kFixCol, .col = j, .value = lower_[j]});
+      fix_col(j, lower_[j]);
+      ++stats_.fixed_cols;
+      changed = true;
+      continue;
+    }
+    const double c = cost_[j];
+    // Whether decreasing (increasing) x_j can never make an active row infeasible.
+    bool down_ok = true;
+    bool up_ok = true;
+    for (NnzIndex p = start[j]; p < start[j + 1] && (down_ok || up_ok); ++p) {
+      const Index i = index[p];
+      if (!row_active_[i]) continue;
+      const bool has_lower = row_lower_[i] > -kInf;
+      const bool has_upper = row_upper_[i] < kInf;
+      if (val[p] > 0.0) {
+        down_ok = down_ok && !has_lower;
+        up_ok = up_ok && !has_upper;
+      } else {
+        down_ok = down_ok && !has_upper;
+        up_ok = up_ok && !has_lower;
+      }
+    }
+    double value;
+    if (c >= 0.0 && down_ok && lower_[j] > -kInf) {
+      value = lower_[j];
+    } else if (c <= 0.0 && up_ok && upper_[j] < kInf) {
+      value = upper_[j];
+    } else if (c == 0.0 && down_ok && up_ok) {
+      value = std::clamp(0.0, lower_[j], upper_[j]);  // Free and cost-free: any value will do.
+    } else {
+      continue;  // Includes unbounded directions, which are left to the simplex.
+    }
+    records_.push_back({.kind = Kind::kFixCol, .col = j, .value = value});
+    fix_col(j, value);
+    if (col_count_[j] == 0) {
+      ++stats_.empty_cols;
+    } else {
+      ++stats_.dominated_cols;
+    }
+    changed = true;
+  }
+  return true;
+}
+
+bool Presolve::process_singleton_cols(bool& changed) {
+  const auto start = model_.A.col_start();
+  const auto index = model_.A.row_index();
+  const auto val = model_.A.values();
+  const auto rstart = At_.col_start();
+  const auto rindex = At_.row_index();
+  const auto rval = At_.values();
+  for (Index j = 0; j < n_; ++j) {
+    if (!col_active_[j] || col_count_[j] != 1) continue;
+    if (lower_[j] > -kInf || upper_[j] < kInf) continue;
+    if (options_.mip && is_int(j)) continue;
+    NnzIndex p = start[j];
+    while (!row_active_[index[p]]) ++p;
+    const Index i = index[p];
+    const double a = val[p];
+    const bool equality = row_lower_[i] == row_upper_[i];
+    if (!equality && cost_[j] != 0.0) continue;
+
+    double row_max = 0.0;
+    for (NnzIndex q = rstart[i]; q < rstart[i + 1]; ++q) {
+      if (col_active_[rindex[q]]) row_max = std::max(row_max, std::fabs(rval[q]));
+    }
+    if (std::fabs(a) < kSubstitutionPivotRatio * row_max) continue;
+
+    Record record{.kind = equality ? Kind::kSubstituteCol : Kind::kSlackCol,
+                  .row = i,
+                  .col = j,
+                  .a = a,
+                  .cost = cost_[j],
+                  .rhs_lower = row_lower_[i],
+                  .rhs_upper = row_upper_[i]};
+    record.first = terms_.size();
+    for (NnzIndex q = rstart[i]; q < rstart[i + 1]; ++q) {
+      const Index k = rindex[q];
+      if (k == j || !col_active_[k]) continue;
+      terms_.push_back({k, rval[q], 0.0, 0.0, false});
+    }
+    record.last = terms_.size();
+    if (equality && cost_[j] != 0.0) {
+      // c_j x_j = c_j (b - sum_k a_k x_k) / a moves into the other costs and the offset.
+      const double ratio = cost_[j] / a;
+      for (std::size_t t = record.first; t < record.last; ++t) {
+        cost_[terms_[t].col] -= ratio * terms_[t].a;
+      }
+      offset_ += ratio * row_lower_[i];
+    }
+    records_.push_back(record);
+    remove_col(j);
+    remove_row(i);
+    ++stats_.free_col_singletons;
+    changed = true;
+  }
+  return true;
+}
+
+bool Presolve::process_duplicate_rows(bool& changed) {
+  const auto start = At_.col_start();
+  const auto index = At_.row_index();
+  const auto val = At_.values();
+  // Hash each row's pattern and values normalized by its first active coefficient.
+  const auto first_active = [&](Index i) {
+    NnzIndex p = start[i];
+    while (p < start[i + 1] && !col_active_[index[p]]) ++p;
+    return p;
+  };
+  std::unordered_map<std::uint64_t, std::vector<Index>> buckets;
+  for (Index i = 0; i < m_; ++i) {
+    if (!row_active_[i] || row_count_[i] < 2) continue;
+    const NnzIndex p0 = first_active(i);
+    const double scale = 1.0 / val[p0];
+    std::uint64_t h = 1469598103934665603ULL;
+    for (NnzIndex p = p0; p < start[i + 1]; ++p) {
+      if (!col_active_[index[p]]) continue;
+      const auto q = static_cast<std::int64_t>(std::llround(val[p] * scale * 1e6));
+      h = (h ^ static_cast<std::uint64_t>(index[p])) * 1099511628211ULL;
+      h = (h ^ static_cast<std::uint64_t>(q)) * 1099511628211ULL;
+    }
+    buckets[h].push_back(i);
+  }
+
+  // factor with a_k = factor * a_i, or 0 if the active parts are not parallel.
+  const auto parallel = [&](Index i, Index k) {
+    if (row_count_[i] != row_count_[k]) return 0.0;
+    NnzIndex p = first_active(i);
+    NnzIndex q = first_active(k);
+    const double factor = val[q] / val[p];
+    while (p < start[i + 1] || q < start[k + 1]) {
+      while (p < start[i + 1] && !col_active_[index[p]]) ++p;
+      while (q < start[k + 1] && !col_active_[index[q]]) ++q;
+      const bool end_i = p >= start[i + 1];
+      const bool end_k = q >= start[k + 1];
+      if (end_i || end_k) return end_i && end_k ? factor : 0.0;
+      if (index[p] != index[q]) return 0.0;
+      if (std::fabs(val[q] - factor * val[p]) > kParallelTol * std::fabs(val[q])) return 0.0;
+      ++p;
+      ++q;
+    }
+    return factor;
+  };
+
+  for (auto& [hash, rows] : buckets) {
+    if (rows.size() < 2) continue;
+    for (std::size_t s = 0; s < rows.size(); ++s) {
+      const Index i = rows[s];
+      if (!row_active_[i]) continue;
+      for (std::size_t t = s + 1; t < rows.size(); ++t) {
+        const Index k = rows[t];
+        if (!row_active_[k]) continue;
+        const double factor = parallel(i, k);
+        if (factor == 0.0) continue;
+        // Row k in terms of row i's activity.
+        double lo = factor > 0.0 ? row_lower_[k] / factor : row_upper_[k] / factor;
+        double up = factor > 0.0 ? row_upper_[k] / factor : row_lower_[k] / factor;
+        if (std::isnan(lo)) lo = -kInf;
+        if (std::isnan(up)) up = kInf;
+        Record record{.kind = Kind::kDuplicateRow, .row = i, .row2 = k, .value = factor};
+        record.flag1 = lo > row_lower_[i];
+        record.flag2 = up < row_upper_[i];
+        double new_lower = std::max(lo, row_lower_[i]);
+        double new_upper = std::min(up, row_upper_[i]);
+        if (new_lower > new_upper) {
+          if (new_lower > new_upper + tol(new_upper)) return false;
+          // Crossed within the tolerance: make the row an equality at the upper bound.
+          new_lower = new_upper;
+          record.flag1 = record.flag2;
+        }
+        row_lower_[i] = new_lower;
+        row_upper_[i] = new_upper;
+        records_.push_back(record);
+        remove_row(k);
+        ++stats_.duplicate_rows;
+        changed = true;
+      }
+    }
+  }
+  return true;
+}
+
+PresolveStatus Presolve::run() {
+  for (Index j = 0; j < n_; ++j) {
+    if (is_int(j) && !set_bounds(j, lower_[j], upper_[j])) return PresolveStatus::kInfeasible;
+  }
+  for (int pass = 0; pass < options_.max_passes; ++pass) {
+    bool changed = false;
+    if (!process_rows(changed) || !process_cols(changed) || !process_singleton_cols(changed) ||
+        !process_duplicate_rows(changed)) {
+      return PresolveStatus::kInfeasible;
+    }
+    ++stats_.passes;
+    if (!changed) break;
+  }
+  build_reduced();
+  return PresolveStatus::kReduced;
+}
+
+void Presolve::build_reduced() {
+  std::vector<Index> new_col(static_cast<std::size_t>(n_), -1);
+  std::vector<Index> new_row(static_cast<std::size_t>(m_), -1);
+  col_map_.clear();
+  row_map_.clear();
+  for (Index j = 0; j < n_; ++j) {
+    if (!col_active_[j]) continue;
+    new_col[j] = static_cast<Index>(col_map_.size());
+    col_map_.push_back(j);
+  }
+  for (Index i = 0; i < m_; ++i) {
+    if (!row_active_[i]) continue;
+    new_row[i] = static_cast<Index>(row_map_.size());
+    row_map_.push_back(i);
+  }
+  reduced_ = Model{};
+  reduced_.name = model_.name;
+  reduced_.sense = model_.sense;
+  reduced_.obj_offset = sense_ * offset_;
+  for (const Index j : col_map_) {
+    reduced_.obj.push_back(sense_ * cost_[j]);
+    reduced_.col_lower.push_back(lower_[j]);
+    reduced_.col_upper.push_back(upper_[j]);
+    reduced_.col_type.push_back(model_.col_type[j]);
+    if (!model_.col_names.empty()) reduced_.col_names.push_back(model_.col_names[j]);
+  }
+  for (const Index i : row_map_) {
+    reduced_.row_lower.push_back(row_lower_[i]);
+    reduced_.row_upper.push_back(row_upper_[i]);
+    if (!model_.row_names.empty()) reduced_.row_names.push_back(model_.row_names[i]);
+  }
+  std::vector<Triplet> triplets;
+  const auto start = model_.A.col_start();
+  const auto index = model_.A.row_index();
+  const auto val = model_.A.values();
+  for (Index j = 0; j < n_; ++j) {
+    if (new_col[j] < 0) continue;
+    for (NnzIndex p = start[j]; p < start[j + 1]; ++p) {
+      if (new_row[index[p]] >= 0) triplets.push_back({new_row[index[p]], new_col[j], val[p]});
+    }
+  }
+  reduced_.A = SparseMatrix::from_triplets(static_cast<Index>(row_map_.size()),
+                                           static_cast<Index>(col_map_.size()),
+                                           std::move(triplets));
+}
+
+void Presolve::postsolve(const std::vector<double>& reduced_x,
+                         const std::vector<double>& reduced_y, std::vector<double>& x,
+                         std::vector<double>& y) const {
+  const bool duals = reduced_y.size() == row_map_.size() && !options_.mip;
+  x.assign(static_cast<std::size_t>(n_), 0.0);
+  y.assign(static_cast<std::size_t>(m_), 0.0);
+  for (std::size_t k = 0; k < col_map_.size(); ++k) x[col_map_[k]] = reduced_x[k];
+  if (duals) {
+    for (std::size_t k = 0; k < row_map_.size(); ++k) y[row_map_[k]] = sense_ * reduced_y[k];
+  }
+
+  const auto start = model_.A.col_start();
+  const auto index = model_.A.row_index();
+  const auto val = model_.A.values();
+  // Reduced cost of column j for the model at the time of a reduction: rows removed before it
+  // still have y = 0 here.
+  const auto reduced_cost = [&](Index j, double cost) {
+    double d = cost;
+    for (NnzIndex p = start[j]; p < start[j + 1]; ++p) d -= val[p] * y[index[p]];
+    return d;
+  };
+  const auto at = [&](double v, double bound) {
+    return std::isfinite(bound) && std::fabs(v - bound) <= tol(bound);
+  };
+
+  for (auto it = records_.rbegin(); it != records_.rend(); ++it) {
+    const Record& r = *it;
+    switch (r.kind) {
+      case Kind::kFixCol:
+        x[r.col] = r.value;
+        break;
+      case Kind::kRemoveRow:
+        y[r.row] = 0.0;
+        break;
+      case Kind::kSingletonRow: {
+        if (!duals) break;
+        // If the column rests on a bound that came from this row, the row takes its reduced
+        // cost.
+        const double d = reduced_cost(r.col, r.cost);
+        const double v = x[r.col];
+        if ((d > 0.0 && !at(v, r.old_lower)) || (d < 0.0 && !at(v, r.old_upper))) {
+          y[r.row] = d / r.a;
+        }
+        break;
+      }
+      case Kind::kForcingRow: {
+        for (std::size_t t = r.first; t < r.last; ++t) x[terms_[t].col] = terms_[t].value;
+        if (!duals) break;
+        // The row is at its upper bound (minimum activity) or lower bound (maximum activity);
+        // choose y of that sign so every column's reduced cost fits the bound it sits on.
+        double yi = 0.0;
+        for (std::size_t t = r.first; t < r.last; ++t) {
+          const Term& term = terms_[t];
+          if (!term.boxed) continue;
+          const double ratio = reduced_cost(term.col, term.cost) / term.a;
+          yi = r.flag1 ? std::min(yi, ratio) : std::max(yi, ratio);
+        }
+        y[r.row] = yi;
+        break;
+      }
+      case Kind::kSubstituteCol: {
+        double s = 0.0;
+        for (std::size_t t = r.first; t < r.last; ++t) s += terms_[t].a * x[terms_[t].col];
+        x[r.col] = (r.rhs_lower - s) / r.a;
+        if (duals) y[r.row] = r.cost / r.a;
+        break;
+      }
+      case Kind::kSlackCol: {
+        double s = 0.0;
+        for (std::size_t t = r.first; t < r.last; ++t) s += terms_[t].a * x[terms_[t].col];
+        const double target = std::clamp(s, r.rhs_lower, r.rhs_upper);
+        x[r.col] = (target - s) / r.a;
+        if (duals) y[r.row] = 0.0;
+        break;
+      }
+      case Kind::kDuplicateRow: {
+        if (!duals) break;
+        const double yi = y[r.row];
+        if ((yi > 0.0 && r.flag1) || (yi < 0.0 && r.flag2)) {
+          y[r.row2] = yi / r.value;
+          y[r.row] = 0.0;
+        }
+        break;
+      }
+    }
+  }
+  if (duals) {
+    for (double& v : y) v *= sense_;
+  }
+}
+
+}  // namespace samaya

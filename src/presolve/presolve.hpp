@@ -1,0 +1,147 @@
+#pragma once
+
+#include <cstdint>
+#include <vector>
+
+#include "samaya/model.hpp"
+
+namespace samaya {
+
+enum class PresolveStatus : std::uint8_t {
+  kReduced,     // reduced() holds an equivalent (possibly empty) model.
+  kInfeasible,  // A reduction proved the model infeasible.
+};
+
+struct PresolveOptions {
+  double feasibility_tol = 1e-9;
+  double integrality_tol = 1e-6;
+  // Keep reductions valid for integer columns (no substitution of integer columns, integral
+  // bounds). Postsolve then restores primal values only.
+  bool mip = false;
+  int max_passes = 50;
+};
+
+struct PresolveStats {
+  int passes = 0;
+  Index rows_removed = 0;
+  Index cols_removed = 0;
+  Index empty_rows = 0;
+  Index singleton_rows = 0;
+  Index forcing_rows = 0;
+  Index redundant_rows = 0;
+  Index duplicate_rows = 0;
+  Index fixed_cols = 0;
+  Index empty_cols = 0;
+  Index dominated_cols = 0;
+  Index free_col_singletons = 0;
+  Index bounds_tightened = 0;
+};
+
+// LP / MILP presolve: removes rows and columns without creating fill-in, then maps a solution of
+// the reduced model back to the original.
+//
+// Reductions: empty rows and columns, fixed columns, singleton rows (turned into column bounds),
+// forcing and redundant rows (from row activity bounds), dominated columns (a column whose cost
+// and coefficients all push it to one finite bound is fixed there), free column singletons
+// (substituted out of an equality row, or absorbing an inequality row when the column has no
+// cost) and duplicate (parallel) rows.
+//
+// Postsolve undoes the reductions in reverse order and restores both the primal values and the
+// row duals: each step keeps the solution optimal for the model as it was before that reduction,
+// so the result satisfies the optimality conditions of the original model. Reduced costs follow
+// from the original model as c - A'y.
+class Presolve {
+ public:
+  Presolve(const Model& model, const PresolveOptions& options = {});
+
+  PresolveStatus run();
+
+  const Model& reduced() const { return reduced_; }
+  const PresolveStats& stats() const { return stats_; }
+  // Original index of each reduced column / row.
+  const std::vector<Index>& col_map() const { return col_map_; }
+  const std::vector<Index>& row_map() const { return row_map_; }
+
+  // Maps a reduced solution (x: reduced columns, y: reduced row duals in the convention
+  // c - A'y of the reduced model; may be empty for MIP) to the original model.
+  void postsolve(const std::vector<double>& reduced_x, const std::vector<double>& reduced_y,
+                 std::vector<double>& x, std::vector<double>& y) const;
+
+ private:
+  enum class Kind : std::uint8_t {
+    kFixCol,          // Column fixed at `value` (fixed, empty or dominated).
+    kRemoveRow,       // Empty or redundant row: y = 0.
+    kSingletonRow,    // Row turned into bounds on `col`.
+    kForcingRow,      // Row forcing its columns to the bounds in `terms` (lower: activity min).
+    kSubstituteCol,   // Free singleton column solved from equality `row`.
+    kSlackCol,        // Free cost-free singleton column absorbing inequality `row`.
+    kDuplicateRow,    // `row2` merged into `row` with a_row2 = factor * a_row.
+  };
+  struct Term {
+    Index col;
+    double a;
+    double cost;   // Column cost when the reduction was made.
+    double value;  // Forcing rows: the bound the column is fixed at.
+    bool boxed;    // Forcing rows: the column had distinct finite-or-not bounds (lower < upper).
+  };
+  struct Record {
+    Kind kind;
+    Index row = -1;
+    Index col = -1;
+    Index row2 = -1;
+    double a = 0.0;
+    double value = 0.0;
+    double cost = 0.0;
+    double old_lower = 0.0;
+    double old_upper = 0.0;
+    double rhs_lower = 0.0;
+    double rhs_upper = 0.0;
+    bool flag1 = false;  // Forcing: at activity minimum. Duplicate: lower bound from row2.
+    bool flag2 = false;  // Duplicate: upper bound from row2.
+    std::size_t first = 0;  // Terms [first, last).
+    std::size_t last = 0;
+  };
+
+  bool is_int(Index j) const { return model_.col_type[j] == VarType::kInteger; }
+  double tol(double v) const;
+
+  void remove_row(Index i);
+  void remove_col(Index j);
+  void fix_col(Index j, double value);
+  bool set_bounds(Index j, double lower, double upper);  // False if crossed (infeasible).
+  void activity_bounds(Index i, double& min_act, double& max_act) const;
+
+  bool process_cols(bool& changed);
+  bool process_rows(bool& changed);
+  bool process_singleton_cols(bool& changed);
+  bool process_duplicate_rows(bool& changed);
+  void build_reduced();
+
+  const Model& model_;
+  PresolveOptions options_;
+  Index m_;
+  Index n_;
+  double sense_;
+  SparseMatrix At_;  // Row-wise copy of A.
+
+  std::vector<double> cost_;  // Minimization costs.
+  std::vector<double> lower_;
+  std::vector<double> upper_;
+  std::vector<double> row_lower_;
+  std::vector<double> row_upper_;
+  double offset_ = 0.0;
+  std::vector<char> row_active_;
+  std::vector<char> col_active_;
+  std::vector<Index> row_count_;
+  std::vector<Index> col_count_;
+
+  std::vector<Record> records_;
+  std::vector<Term> terms_;
+
+  Model reduced_;
+  std::vector<Index> col_map_;
+  std::vector<Index> row_map_;
+  PresolveStats stats_;
+};
+
+}  // namespace samaya

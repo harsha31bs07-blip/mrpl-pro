@@ -17,7 +17,8 @@ for the architecture, algorithms, benchmarks and timeline.
 | Primal simplex (Devex) for cleanup and unboundedness | done |
 | Warm start from a given basis; cleanup of unscaled infeasibilities | done |
 | Independent verifier: optimality, Farkas certificates, unbounded rays | done |
-| Presolve, hyper-sparse solves, barrier, PDLP (CPU + GPU) | phase 2–3 |
+| LP presolve + postsolve (primal and dual), verified on the original model | done |
+| Hyper-sparse solves, barrier, PDLP (CPU + GPU) | phase 2–3 |
 | Branch-and-cut (MILP), QP | phase 3–4 |
 
 **Netlib: all 93 feasible instances solved, every objective matching HiGHS; 28 of the 29
@@ -83,6 +84,7 @@ src/core/       model, solver dispatch, status, logging, C API
 src/io/         file readers
 src/linalg/     sparse matrices, scaling, basis LU with Forrest–Tomlin updates
 src/lp/         dual and primal simplex, LP driver (scaling, unscaling)
+src/presolve/   LP/MILP presolve and postsolve
 src/verify/     independent solution and certificate checks
 apps/cli/       samaya command-line tool
 tests/          unit tests (self-contained framework), dense reference solvers, random LP
@@ -90,4 +92,4 @@ tests/          unit tests (self-contained framework), dense reference solvers, 
 bench/          benchmark harness, instance generator and download script
 ```
 
-Later phases add `src/presolve`, `src/qp`, `src/mip` and `src/gpu`, as described in PLAN.md §3.
+Later phases add `src/qp`, `src/mip` and `src/gpu`, as described in PLAN.md §3.
