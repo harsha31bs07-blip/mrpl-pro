@@ -82,6 +82,11 @@ class Simplex {
   const std::vector<double>& duals() const { return y_; }          // m.
   const std::vector<double>& reduced_costs() const { return d_; }  // n + m.
   const std::vector<VarStatus>& status() const { return status_; }
+  // Variable basic at each basis position (m) after a solve.
+  const std::vector<Index>& basic() const { return basic_; }
+  // Row `position` of the simplex tableau, e_r' B^-1 [A -I], over all n + m variables (dense,
+  // scaled space). Used to derive Gomory cuts.
+  void tableau_row(Index position, std::vector<double>& row) const;
   // Farkas ray y (length m) after kInfeasible: 0 is outside the range of
   // y'A x - y'r over the variable bounds.
   const std::vector<double>& dual_ray() const { return dual_ray_; }

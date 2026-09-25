@@ -24,6 +24,18 @@ struct MipOptions {
   int reliability = 4;
   int max_strong_branching = 8;       // Strong-branching candidates per node.
   long long strong_iterations = 200;  // Dual simplex iterations per strong-branching child.
+  // Beyond the soft limit of open nodes the search switches to depth first (a LIFO stack), which
+  // stops the open list from growing; beyond the hard limit it stops with kNodeLimit instead of
+  // exhausting memory. An open node costs about 400 bytes, so the defaults stay near 2 GB.
+  std::size_t max_open_nodes_soft = 2500000;
+  std::size_t max_open_nodes = 5000000;
+  // Root cutting planes (Gomory mixed-integer, c-MIR, lifted knapsack covers).
+  bool cuts = true;
+  int max_cut_rounds = 20;
+  int max_cuts_per_round = 200;
+  // Tests: a known feasible (e.g. optimal) solution. Every cut is checked against it and a cut
+  // that separates it is counted in MipOutcome::debug_cut_violations.
+  std::vector<double> debug_solution;
 };
 
 struct MipOutcome {
@@ -37,6 +49,11 @@ struct MipOutcome {
   long long lp_iterations = 0;
   long long strong_branching_iterations = 0;
   int heuristic_solutions = 0;
+  int cut_rounds = 0;
+  int cuts_added = 0;             // Cuts in the LP after the root (non-binding ones removed).
+  double root_bound = -kInf;      // Root LP bound before and after cuts, in the model's sense.
+  double root_bound_cuts = -kInf;
+  long long debug_cut_violations = 0;
 };
 
 // LP-based branch-and-bound for mixed-integer linear programs.
@@ -63,10 +80,18 @@ class BranchAndBound {
     double lower;
     double upper;
   };
+  // Bound changes are stored as a tree shared by the nodes: a node's bounds are the root bounds
+  // plus the changes of every segment from the root down, then its own `local` changes. Memory
+  // is proportional to the changes, not to nodes x depth.
+  struct PathSegment {
+    std::shared_ptr<const PathSegment> parent;
+    std::vector<BoundChange> changes;
+  };
   struct Node {
     double bound = -kInf;  // Lower bound (minimization) inherited from the parent.
     int depth = 0;
-    std::vector<BoundChange> path;  // Applied in order on top of the root bounds.
+    std::shared_ptr<const PathSegment> path;
+    std::vector<BoundChange> local;  // The branching, then propagation at this node.
     std::shared_ptr<const std::vector<VarStatus>> basis;
     Index branch_col = -1;  // The branching that created this node, for pseudocosts.
     bool branch_up = false;
@@ -75,11 +100,17 @@ class BranchAndBound {
   enum class NodeResult : std::uint8_t { kPruned, kBranched, kStopped, kFailed, kUnbounded };
 
   // Relaxation.
+  void build_relaxation();
   void set_bound(Index j, double lower, double upper);
   void apply_node_bounds(const Node& node);
   SimplexStatus solve_relaxation(const std::vector<VarStatus>* start, long long iteration_limit);
   double relaxation_objective() const;
   std::vector<VarStatus> current_basis() const;
+
+  // Cuts.
+  void root_cut_loop();
+  int separate_and_add_cuts();
+  void remove_rows(const std::vector<Index>& rows);
 
   // Search.
   NodeResult process_node(Node& node, std::vector<Node>& children);
@@ -100,12 +131,13 @@ class BranchAndBound {
   void simple_rounding(const std::vector<double>& x);
   void round_and_solve(const std::vector<double>& x, const std::vector<VarStatus>& basis);
 
-  const Model& model_;
+  Model model_;  // Own copy: cuts are appended as rows.
   MipOptions options_;
   const Logger& log_;
   Timer timer_;
   Index m_;
   Index n_;
+  Index original_rows_;
   double sense_;
   std::vector<double> cost_;  // Minimization costs.
   double offset_;
@@ -138,11 +170,13 @@ class BranchAndBound {
   long long pc_total_count_[2] = {0, 0};
 
   std::multimap<double, Node> open_;
+  std::vector<Node> dive_stack_;  // Depth-first mode once open_ reaches the soft limit.
   double incumbent_value_ = kInf;
   std::vector<double> incumbent_;
   double pruned_bound_ = kInf;  // Smallest bound among nodes pruned by the cutoff.
   MipOutcome outcome_;
   bool incomplete_ = false;
+  bool open_limit_logged_ = false;
 };
 
 }  // namespace samaya

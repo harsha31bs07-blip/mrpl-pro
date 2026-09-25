@@ -700,6 +700,22 @@ SimplexStatus Simplex::primal_loop(LoopResult& result) {
   }
 }
 
+void Simplex::tableau_row(Index position, std::vector<double>& row) const {
+  std::vector<double> rho(static_cast<std::size_t>(m_), 0.0);
+  rho[position] = 1.0;
+  factor_.btran(rho);
+  row.assign(static_cast<std::size_t>(nt_), 0.0);
+  const auto start = lp_.At.col_start();
+  const auto index = lp_.At.row_index();
+  const auto value = lp_.At.values();
+  for (Index i = 0; i < m_; ++i) {
+    const double r = rho[i];
+    if (r == 0.0) continue;
+    for (NnzIndex p = start[i]; p < start[i + 1]; ++p) row[index[p]] += r * value[p];
+    row[n_ + i] = -r;
+  }
+}
+
 std::vector<double> Simplex::exact_dse_weights() const {
   std::vector<double> weights(static_cast<std::size_t>(m_));
   std::vector<double> row;

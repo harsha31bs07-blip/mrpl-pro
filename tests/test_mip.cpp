@@ -6,6 +6,8 @@
 #include <random>
 #include <vector>
 
+#include "core/log.hpp"
+#include "mip/branch_and_bound.hpp"
 #include "reference_milp.hpp"
 #include "samaya/io.hpp"
 #include "samaya/solver.hpp"
@@ -163,6 +165,66 @@ TEST(mip_random_models_match_reference) {
   }
 }
 
+TEST(mip_cuts_never_separate_an_optimal_solution) {
+  // Root cuts are checked against a known optimal solution (the reference's); a valid cut can
+  // never separate it. The search runs without presolve so the solution applies directly.
+  const samaya::Logger quiet(0);
+  long long violations = 0;
+  long long cuts = 0;
+  int models = 0;
+  int tightened = 0;
+  for (const MilpFamily family :
+       {MilpFamily::kMixed, MilpFamily::kPureInteger, MilpFamily::kKnapsack}) {
+    std::mt19937 rng(100 + static_cast<unsigned>(family));
+    for (int k = 0; k < 200; ++k) {
+      const Model model = random_milp(family, rng);
+      const ReferenceMilpResult ref = samaya::test::reference_milp(model);
+      if (ref.status != ReferenceMilpResult::Status::kOptimal) continue;
+      samaya::MipOptions options;
+      options.rel_gap = 0.0;
+      options.abs_gap = 1e-9;
+      options.debug_solution = ref.x;
+      samaya::BranchAndBound search(model, options, quiet);
+      const samaya::MipOutcome out = search.solve();
+      ++models;
+      violations += out.debug_cut_violations;
+      cuts += out.cut_rounds > 0 ? out.cuts_added : 0;
+      const double sense = model.sense == samaya::ObjSense::kMaximize ? -1.0 : 1.0;
+      if (sense * out.root_bound_cuts > sense * out.root_bound + 1e-9) ++tightened;
+      CHECK(out.status == Status::kOptimal);
+      CHECK(std::fabs(out.objective - ref.objective) <= 1e-6 * (1 + std::fabs(ref.objective)));
+    }
+  }
+  std::printf("  %d models, %lld cuts kept, %d root bounds tightened, %lld violations\n",
+              models, cuts, tightened, violations);
+  CHECK_EQ(violations, 0);
+  CHECK(models > 400);
+  CHECK(tightened > 100);
+}
+
+TEST(mip_random_models_match_reference_without_cuts) {
+  std::mt19937 rng(21);
+  samaya::Params params;
+  params.log_level = 0;
+  int failures = 0;
+  for (int k = 0; k < 150; ++k) {
+    const Model model = random_milp(k % 2 ? MilpFamily::kMixed : MilpFamily::kKnapsack, rng);
+    const ReferenceMilpResult ref = samaya::test::reference_milp(model);
+    if (ref.status != ReferenceMilpResult::Status::kOptimal) continue;
+    samaya::MipOptions options;
+    options.cuts = false;
+    options.rel_gap = 0.0;
+    options.abs_gap = 1e-9;
+    const samaya::Logger quiet(0);
+    const samaya::MipOutcome out = samaya::BranchAndBound(model, options, quiet).solve();
+    if (out.status != Status::kOptimal ||
+        std::fabs(out.objective - ref.objective) > 1e-6 * (1 + std::fabs(ref.objective))) {
+      ++failures;
+    }
+  }
+  CHECK_EQ(failures, 0);
+}
+
 TEST(mip_node_limit_reports_limit_with_valid_bound) {
   // A knapsack whose LP bound is loose needs more than one node.
   Model model;
@@ -191,6 +253,22 @@ TEST(mip_node_limit_reports_limit_with_valid_bound) {
   const samaya::Result limited = samaya::Solver(params).solve(model);
   CHECK(limited.status == Status::kNodeLimit || limited.status == Status::kOptimal);
   CHECK(limited.dual_bound >= ref.objective - 1e-9);  // Maximization: bound from above.
+
+  // An open-node cap stops the search cleanly with a valid bound instead of exhausting memory;
+  // the soft cap switches to depth-first search first.
+  const samaya::Logger quiet(0);
+  samaya::MipOptions capped;
+  capped.rel_gap = 0.0;
+  capped.cuts = false;
+  capped.max_open_nodes_soft = 2;
+  capped.max_open_nodes = 3;
+  const samaya::MipOutcome out = samaya::BranchAndBound(model, capped, quiet).solve();
+  CHECK(out.status == Status::kNodeLimit || out.status == Status::kOptimal);
+  CHECK(out.bound >= ref.objective - 1e-9);
+  capped.max_open_nodes = 1000;
+  const samaya::MipOutcome dfs = samaya::BranchAndBound(model, capped, quiet).solve();
+  CHECK(dfs.status == Status::kOptimal);
+  CHECK_NEAR(dfs.objective, ref.objective, 1e-9);
 
   params.node_limit = -1;
   const samaya::Result full = samaya::Solver(params).solve(model);

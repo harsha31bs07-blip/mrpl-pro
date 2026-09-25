@@ -2,7 +2,10 @@
 
 A sovereign LP / MILP / QP optimization solver core, built from mathematical foundations for
 SIH problem statement 26119 (MRPL). No external solver library is used. See [PLAN.md](PLAN.md)
-for the architecture, algorithms, benchmarks and timeline.
+for the architecture, algorithms, benchmarks and timeline, and
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how the code fits together and the open work
+packages (PDLP, GPU, barrier, QP, case studies). New to the project? Start with
+[docs/ONBOARDING.md](docs/ONBOARDING.md): machine setup, build, and the Git/pull-request workflow.
 
 ## Status
 
@@ -20,12 +23,16 @@ for the architecture, algorithms, benchmarks and timeline.
 | LP presolve + postsolve (primal and dual), verified on the original model | done |
 | Hyper-sparse solves, barrier, PDLP (CPU + GPU) | phase 2–3 |
 | MILP branch-and-bound: warm-started dual simplex, propagation, reliability branching, plunging, rounding heuristics | done |
-| Cutting planes (MILP), QP | phase 3–4 |
+| Root cutting planes: Gomory mixed-integer, c-MIR, lifted knapsack covers | done |
+| Cuts in the tree, flow covers, parallel tree search, QP | phase 3–4 |
 
 **Netlib: all 93 feasible instances solved, every objective matching HiGHS; 28 of the 29
 infeasible instances proven infeasible with a verified Farkas certificate** (the remaining one,
 `cplex2`, is infeasible by less than the tolerance and is reported as unproven). Per-instance
-results and timings: [docs/results/netlib.md](docs/results/netlib.md).
+results and timings: [docs/results/netlib.md](docs/results/netlib.md). MILP:
+[docs/results/miplib.md](docs/results/miplib.md) (MIPLIB 2017 subset, no wrong answers) and
+[docs/results/generated-mip.md](docs/results/generated-mip.md) (refinery scheduling, knapsack,
+facility location; all match HiGHS).
 
 LP models are solved by the dual simplex. Every optimal solution, infeasibility certificate and
 unbounded ray is checked by the independent verifier before it is reported; an outcome that does

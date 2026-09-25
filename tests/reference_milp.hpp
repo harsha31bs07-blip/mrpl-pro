@@ -15,6 +15,7 @@ namespace samaya::test {
 struct ReferenceMilpResult {
   enum class Status { kOptimal, kInfeasible, kUnbounded, kNodeLimit } status = Status::kInfeasible;
   double objective = 0.0;
+  std::vector<double> x;  // An optimal solution.
   long long nodes = 0;
 };
 
@@ -55,6 +56,10 @@ inline ReferenceMilpResult reference_milp(const Model& model, long long node_lim
     }
     if (branch < 0) {
       best = value;
+      result.x = lp.x;
+      for (Index j = 0; j < model.num_cols(); ++j) {
+        if (model.col_type[j] == VarType::kInteger) result.x[j] = std::round(result.x[j]);
+      }
       continue;
     }
     const double v = lp.x[branch];
