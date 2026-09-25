@@ -11,6 +11,7 @@
 
 #include "core/log.hpp"
 #include "mip/branch_and_bound.hpp"
+#include "mip/cuts.hpp"
 #include "reference_milp.hpp"
 #include "samaya/io.hpp"
 #include "samaya/solver.hpp"
@@ -252,6 +253,63 @@ Model fixed_charge(std::mt19937& rng) {
   }
   model.A = samaya::SparseMatrix::from_triplets(row, static_cast<Index>(model.obj.size()),
                                                 std::move(t));
+  return model;
+}
+
+// Fixed-charge network flow with big-M arcs (x_a <= M y_a, M = total supply), as in p200x1188c
+// and mc11: flow conservation rows over continuous flows only, so c-MIR finds nothing and the
+// root gap needs flow covers.
+Model big_m_network(std::mt19937& rng) {
+  const auto uniform_int = [&](int lo, int hi) {
+    return std::uniform_int_distribution<int>(lo, hi)(rng);
+  };
+  const int nodes = uniform_int(3, 5);
+  std::vector<double> demand(static_cast<std::size_t>(nodes), 0.0);
+  double supply = 0.0;
+  for (int v = 1; v < nodes; ++v) {
+    demand[v] = uniform_int(1, 9);
+    supply += demand[v];
+  }
+  demand[0] = -supply;  // Node 0 supplies everything.
+  std::vector<std::pair<int, int>> arcs;
+  for (int v = 1; v < nodes; ++v) arcs.push_back({uniform_int(0, v - 1), v});  // Connected.
+  const int extra = uniform_int(2, 5);
+  for (int k = 0; k < extra; ++k) {
+    const int a = uniform_int(0, nodes - 1);
+    const int b = uniform_int(0, nodes - 1);
+    if (a != b) arcs.push_back({a, b});
+  }
+  Model model;
+  std::vector<samaya::Triplet> t;
+  const auto na = static_cast<Index>(arcs.size());
+  for (Index a = 0; a < na; ++a) {  // Flows, then their binaries.
+    model.obj.push_back(uniform_int(1, 5));
+    model.col_lower.push_back(0);
+    model.col_upper.push_back(kInf);
+    model.col_type.push_back(samaya::VarType::kContinuous);
+  }
+  for (Index a = 0; a < na; ++a) {
+    model.obj.push_back(uniform_int(10, 60));
+    model.col_lower.push_back(0);
+    model.col_upper.push_back(1);
+    model.col_type.push_back(samaya::VarType::kInteger);
+  }
+  Index row = 0;
+  for (int v = 0; v < nodes; ++v, ++row) {  // inflow - outflow = demand.
+    for (Index a = 0; a < na; ++a) {
+      if (arcs[a].second == v) t.push_back({row, a, 1.0});
+      if (arcs[a].first == v) t.push_back({row, a, -1.0});
+    }
+    model.row_lower.push_back(demand[v]);
+    model.row_upper.push_back(demand[v]);
+  }
+  for (Index a = 0; a < na; ++a, ++row) {
+    t.push_back({row, a, 1.0});
+    t.push_back({row, na + a, -supply});
+    model.row_lower.push_back(-kInf);
+    model.row_upper.push_back(0.0);
+  }
+  model.A = samaya::SparseMatrix::from_triplets(row, 2 * na, std::move(t));
   return model;
 }
 
@@ -525,6 +583,105 @@ TEST(mip_parallel_search_matches_reference) {
   CHECK(models > 400);
   CHECK(parallel > 50);
   CHECK_EQ(agree, compared);
+}
+
+TEST(mip_flow_covers_on_big_m_networks) {
+  // Big-M fixed-charge networks: root cuts (flow covers on the conservation rows and their
+  // aggregations) must never separate a known optimum and must close a real part of the gap.
+  const samaya::Logger quiet(0);
+  std::mt19937 rng(91);
+  long long violations = 0;
+  int models = 0;
+  double closed = 0.0;
+  int gaps = 0;
+  for (int k = 0; k < 200; ++k) {
+    const Model model = big_m_network(rng);
+    const ReferenceMilpResult ref = samaya::test::reference_milp(model);
+    if (ref.status != ReferenceMilpResult::Status::kOptimal) continue;
+    samaya::MipOptions options;
+    options.rel_gap = 0.0;
+    options.abs_gap = 1e-9;
+    options.probing = false;
+    options.heuristics = false;
+    options.debug_solution = ref.x;
+    const samaya::MipOutcome out = samaya::BranchAndBound(model, options, quiet).solve();
+    ++models;
+    violations += out.debug_cut_violations;
+    CHECK(out.status == Status::kOptimal);
+    CHECK(std::fabs(out.objective - ref.objective) <= 1e-6 * (1 + std::fabs(ref.objective)));
+    const double gap = ref.objective - out.root_bound;
+    if (gap > 1e-6) {
+      ++gaps;
+      closed += (out.root_bound_cuts - out.root_bound) / gap;
+    }
+  }
+  const double average = gaps > 0 ? closed / gaps : 0.0;
+  std::printf("  %d big-M network models, %.0f%% of the root gap closed on average, %lld "
+              "violations\n", models, 100.0 * average, violations);
+  CHECK_EQ(violations, 0);
+  CHECK(models > 150);
+  CHECK(average > 0.3);
+}
+
+TEST(mip_flow_cover_separates_single_node_big_m) {
+  // One demand node: x1 + x2 + x3 = d, x_a <= M y_a with M >> d. The LP point sends d on arc 1
+  // with y1 = d / M. The separator must cut it off (e.g. y1 + y2 + y3 >= 1), and every cut must
+  // hold at every integer-feasible vertex (each nonempty set of open arcs, all flow on one of
+  // them).
+  constexpr double kDemand = 7.0;
+  constexpr double kBigM = 1000.0;  // d / M < 0.05: c-MIR cannot cut here, only a flow cover.
+  Model model;
+  for (int a = 0; a < 3; ++a) {
+    model.obj.push_back(1.0);
+    model.col_lower.push_back(0);
+    model.col_upper.push_back(kInf);
+    model.col_type.push_back(samaya::VarType::kContinuous);
+  }
+  for (int a = 0; a < 3; ++a) {
+    model.obj.push_back(20.0);
+    model.col_lower.push_back(0);
+    model.col_upper.push_back(1);
+    model.col_type.push_back(samaya::VarType::kInteger);
+  }
+  std::vector<samaya::Triplet> t = {{0, 0, 1.0}, {0, 1, 1.0}, {0, 2, 1.0}};
+  model.row_lower = {kDemand};
+  model.row_upper = {kDemand};
+  for (Index a = 0; a < 3; ++a) {
+    t.push_back({1 + a, a, 1.0});
+    t.push_back({1 + a, 3 + a, -kBigM});
+    model.row_lower.push_back(-kInf);
+    model.row_upper.push_back(0.0);
+  }
+  model.A = samaya::SparseMatrix::from_triplets(4, 6, std::move(t));
+  const samaya::SparseMatrix at = model.A.transpose();
+  const std::vector<double> x = {kDemand, 0, 0, kDemand / kBigM, 0, 0};
+  const samaya::CutContext ctx{model, at, model.col_lower, model.col_upper, x, 4};
+  std::vector<samaya::Cut> cuts;
+  samaya::separate_aggregated_mir(ctx, cuts);
+  REQUIRE(!cuts.empty());
+  double best_violation = 0.0;
+  int invalid = 0;
+  for (const samaya::Cut& c : cuts) {
+    const auto activity = [&](const std::vector<double>& p) {
+      double s = 0.0;
+      for (std::size_t k = 0; k < c.index.size(); ++k) s += c.value[k] * p[c.index[k]];
+      return s;
+    };
+    best_violation = std::max(best_violation, c.lower - activity(x));
+    for (int open = 1; open < 8; ++open) {
+      for (int carrier = 0; carrier < 3; ++carrier) {
+        if (!(open >> carrier & 1)) continue;
+        std::vector<double> p(6, 0.0);
+        p[carrier] = kDemand;
+        for (int a = 0; a < 3; ++a) p[3 + a] = open >> a & 1;
+        if (activity(p) < c.lower - 1e-9) ++invalid;
+      }
+    }
+  }
+  std::printf("  %zu cuts, largest violation of the LP point %.3f, %d invalid\n", cuts.size(),
+              best_violation, invalid);
+  CHECK_EQ(invalid, 0);
+  CHECK(best_violation > 0.5);  // y1 + y2 + y3 >= 1 is violated by 1 - 7/1000.
 }
 
 TEST(mip_random_models_match_reference_without_cuts) {

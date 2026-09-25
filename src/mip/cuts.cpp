@@ -560,6 +560,119 @@ bool mir_on_aggregate(const CutContext& ctx, const Aggregate& agg,
   return found;
 }
 
+// Simple generalized flow cover inequality (Van Roy and Wolsey) on the single-node flow set of an
+// aggregated row sum_j a_j x_j <= beta. Each term becomes a flow z_j = |a_j| x_j with capacity
+// z_j <= u_j y_j: a binary in the row is its own flow (u = |a|, y = itself), a column with a
+// variable upper bound x <= c y uses it, any other column with a finite upper bound has y fixed
+// at 1. With N+ the terms of positive coefficient, N- the others, a cover C+ of N+ with
+// lambda = sum_{C+} u_j - beta > 0 gives
+//   sum_{C+} z_j + sum_{C+} (u_j - lambda)^+ (1 - y_j) - sum_{L-} lambda y_j - sum_{N- \ L-} z_j
+//     <= beta,
+// with L- the N- terms where lambda y_j < z_j at the LP point (constant y_j = 1 counts as the
+// constant lambda). Columns with nonzero lower bounds are shifted; rows with general integer
+// columns unbounded above are skipped.
+bool flow_cover_on_aggregate(const CutContext& ctx, const Aggregate& agg,
+                             const std::vector<VariableBound>& vub, CutBuilder& builder,
+                             Cut& out) {
+  const Model& model = ctx.model;
+  struct Flow {
+    Index x;        // The column of the flow.
+    double a;       // |a_j|: z = a x (after the shift by the lower bound).
+    double u;       // Capacity of z.
+    Index y;        // Its binary, or -1 when y is the constant 1.
+    double z;       // z at the LP point.
+    double ylp;     // y at the LP point.
+    bool positive;  // In N+.
+  };
+  std::vector<Flow> flows;
+  double beta = agg.beta;
+  for (const Index j : agg.cols) {
+    const double c = agg.coef[j];
+    if (c == 0.0) continue;
+    const double lo = ctx.lower[j];
+    const double up = ctx.upper[j];
+    if (!std::isfinite(lo)) return false;
+    const bool binary = is_integer_col(model, j) && lo == 0.0 && up == 1.0;
+    Flow f{j, std::fabs(c), kInf, -1, 0.0, 1.0, c > 0.0};
+    if (binary) {
+      f.u = f.a;
+      f.y = j;
+      f.ylp = ctx.x[j];
+      f.z = f.a * ctx.x[j];
+    } else {
+      beta -= c * lo;  // Shift to x' = x - lo >= 0.
+      f.z = f.a * (ctx.x[j] - lo);
+      if (lo == 0.0 && vub[j].y >= 0 && !is_integer_col(model, j)) {
+        f.u = f.a * vub[j].coef;
+        f.y = vub[j].y;
+        f.ylp = ctx.x[f.y];
+      } else if (std::isfinite(up)) {
+        f.u = f.a * (up - lo);
+      }
+    }
+    flows.push_back(f);
+  }
+  // Cover: N+ flows with a finite capacity, those with y near 1 first, until they exceed beta.
+  std::vector<std::size_t> order;
+  for (std::size_t k = 0; k < flows.size(); ++k) {
+    if (flows[k].positive && std::isfinite(flows[k].u)) order.push_back(k);
+  }
+  std::sort(order.begin(), order.end(), [&](std::size_t p, std::size_t q) {
+    return 1.0 - flows[p].ylp < 1.0 - flows[q].ylp ||
+           (1.0 - flows[p].ylp == 1.0 - flows[q].ylp && flows[p].u > flows[q].u);
+  });
+  std::vector<char> in_cover(flows.size(), 0);
+  double capacity = 0.0;
+  const double eps = 1e-9 * (1.0 + std::fabs(beta));
+  for (const std::size_t k : order) {
+    if (capacity > beta + eps) break;
+    in_cover[k] = 1;
+    capacity += flows[k].u;
+  }
+  const double lambda = capacity - beta;
+  if (!(lambda > eps)) return false;
+
+  // sum_{C+} a x + sum_{C++} (u - lambda)(1 - y) - sum_{L-} lambda y - sum_{rest of N-} a x
+  //   <= beta   (x shifted by its lower bound; constants move to the right-hand side).
+  double rhs = beta;
+  for (std::size_t k = 0; k < flows.size(); ++k) {
+    const Flow& f = flows[k];
+    const double lo = f.y == f.x ? 0.0 : ctx.lower[f.x];
+    if (f.positive) {
+      if (!in_cover[k]) continue;
+      if (f.y == f.x) {
+        // A binary flow: a y + (a - lambda)^+ (1 - y).
+        const double extra = std::max(0.0, f.u - lambda);
+        builder.add(f.x, f.a - extra);
+        rhs -= extra;
+      } else {
+        builder.add(f.x, f.a);
+        rhs += f.a * lo;
+        if (f.y >= 0 && f.u > lambda) {
+          builder.add(f.y, -(f.u - lambda));
+          rhs -= f.u - lambda;
+        }
+      }
+    } else {
+      const bool use_y = f.y == -1 ? lambda < f.z : lambda * f.ylp < f.z;
+      if (use_y) {
+        if (f.y >= 0) {
+          builder.add(f.y, -lambda);
+        } else {
+          rhs += lambda;  // -lambda * 1 on the left.
+        }
+      } else if (f.y == f.x) {
+        builder.add(f.x, -f.a);
+      } else {
+        builder.add(f.x, -f.a);
+        rhs -= f.a * lo;
+      }
+    }
+  }
+  out = builder.take(rhs, -1.0);
+  return finalize_cut(ctx, out);
+}
+
 // Distance of a continuous column from its nearer simple bound: which columns are worth
 // eliminating by aggregation (a column on a variable bound still counts as interior here, as in
 // SCIP's aggregation heuristic; the substitution then uses the variable bound).
@@ -616,7 +729,8 @@ void separate_aggregated_mir(const CutContext& ctx, std::vector<Cut>& cuts) {
       used.assign(1, i0);
       for (int step = 0; step <= kMaxAggregations; ++step) {
         Cut cut;
-        if (mir_on_aggregate(ctx, agg, vub, vlb, builder, ints_work, cut)) {
+        if (mir_on_aggregate(ctx, agg, vub, vlb, builder, ints_work, cut) ||
+            flow_cover_on_aggregate(ctx, agg, vub, builder, cut)) {
           cuts.push_back(std::move(cut));
           break;
         }
