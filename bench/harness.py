@@ -116,8 +116,25 @@ def to_lp_file(instance: Path, tmp: Path) -> Path:
     m = pyscipopt.Model()
     m.hideOutput()
     m.readProblem(str(instance))
+    # An objective constant (e226) is written as a bare number that GLPK rejects and CBC drops:
+    # carry it on a column fixed at 1 instead.
+    offset = m.getObjoffset(original=True)
+    if offset != 0.0:
+        m.addVar(name="objective_constant", lb=1.0, ub=1.0, obj=offset)
+        m.addObjoffset(-offset)
     out = tmp / "model.lp"
     m.writeProblem(str(out), trans=False, genericnames=True, verbose=False)
+    # GLPK rejects rows without terms ("c1: = +0"); drop those that hold trivially (0 = 0,
+    # 0 <= b with b >= 0, 0 >= b with b <= 0) and keep any that could make the model infeasible.
+    kept = []
+    for line in out.read_text().splitlines():
+        empty = re.match(r"^\s*\S+:\s*(<=|>=|=)\s*([+-]?[0-9.eE+-]+)\s*$", line)
+        if empty:
+            op, rhs = empty.group(1), float(empty.group(2))
+            if (op == "=" and rhs == 0) or (op == "<=" and rhs >= 0) or (op == ">=" and rhs <= 0):
+                continue
+        kept.append(line)
+    out.write_text("\n".join(kept) + "\n")
     return out
 
 def run_cbc(exe: str, instance: Path, time_limit: float, threads: int, gap: float) -> dict:
@@ -179,14 +196,17 @@ def run_glpk(exe: str, instance: Path, time_limit: float, threads: int, gap: flo
     raw = raw.group(1).strip() if raw else ""
     status = {"OPTIMAL": "optimal", "INTEGER OPTIMAL": "optimal", "INFEASIBLE (FINAL)": "infeasible",
               "INTEGER EMPTY": "infeasible", "UNBOUNDED": "unbounded",
-              "INTEGER NON-OPTIMAL": "time_limit", "UNDEFINED": "time_limit"}.get(raw, "unknown")
-    if "TIME LIMIT EXCEEDED" in out and status == "unknown":
+              "INTEGER NON-OPTIMAL": "time_limit", "UNDEFINED": "time_limit",
+              "INTEGER UNDEFINED": "time_limit"}.get(raw, "unknown")
+    if "TIME LIMIT EXCEEDED" in out:
         status = "time_limit"
+    elif "RELATIVE MIP GAP TOLERANCE REACHED" in out and status == "time_limit":
+        status = "optimal"  # Stopped at the requested gap, like every other solver.
     if re.search(r"PROBLEM HAS NO (PRIMAL )?FEASIBLE", out):
         status = "infeasible"
     obj = re.search(r"^Objective:\s*\S+\s*=\s*(\S+)", text, re.M)
     objective = float(obj.group(1)) if obj and status in ("optimal", "time_limit") and \
-        raw != "UNDEFINED" else None
+        raw not in ("UNDEFINED", "INTEGER UNDEFINED") else None
     return {"status": status, "objective": objective, "solve_seconds": wall, "wall_seconds": wall}
 
 
@@ -288,6 +308,9 @@ def main() -> int:
             base = [r for s, r in results.items() if s != "samaya"]
             mine = results.get("samaya")
             for other in base:
+                # Only final answers can contradict each other; a limit is not a disagreement.
+                if mine["status"] not in SOLVED or other["status"] not in SOLVED:
+                    continue
                 same_status = mine["status"] == other["status"]
                 same_obj = True
                 if same_status and mine["status"] == "optimal":
