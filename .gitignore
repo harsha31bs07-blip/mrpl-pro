@@ -13,3 +13,4 @@ __pycache__/
 # Benchmark instances are downloaded, never committed.
 bench/instances/
 bench/results/
+cases/instances/
