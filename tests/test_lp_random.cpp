@@ -259,6 +259,56 @@ TEST(lp_dual_steepest_edge_weights_stay_exact) {
   CHECK_EQ(wrong, 0);
 }
 
+TEST(lp_warm_start_from_optimal_and_nearby_bases) {
+  // From its own optimal basis the simplex needs no iterations; from the optimal basis of a
+  // perturbed objective it must reach the same optimum as a cold start.
+  std::mt19937 rng(123);
+  const samaya::Logger quiet(0);
+  int optimal_starts = 0;
+  int nearby_starts = 0;
+  for (int k = 0; k < 150; ++k) {
+    const Model model = samaya::test::random_lp(LpFamily::kFeasible, 30, 40, rng);
+    samaya::LpProblem lp;
+    lp.m = model.num_rows();
+    lp.n = model.num_cols();
+    lp.A = model.A;
+    lp.At = model.A.transpose();
+    lp.cost = model.obj;
+    lp.cost.resize(static_cast<std::size_t>(lp.n + lp.m), 0.0);
+    lp.lower = model.col_lower;
+    lp.upper = model.col_upper;
+    lp.lower.insert(lp.lower.end(), model.row_lower.begin(), model.row_lower.end());
+    lp.upper.insert(lp.upper.end(), model.row_upper.begin(), model.row_upper.end());
+    const auto objective = [&](const samaya::Simplex& s) {
+      double sum = 0.0;
+      for (samaya::Index j = 0; j < lp.n; ++j) sum += lp.cost[j] * s.values()[j];
+      return sum;
+    };
+    const samaya::SimplexOptions options;
+    samaya::Simplex cold(lp, options, quiet);
+    if (cold.solve() != SimplexStatus::kOptimal) continue;
+
+    samaya::Simplex again(lp, options, quiet);
+    REQUIRE(again.solve(cold.status()) == SimplexStatus::kOptimal);
+    CHECK_EQ(again.iterations(), 0);
+    CHECK_NEAR(objective(again), objective(cold), 1e-6 * (1.0 + std::fabs(objective(cold))));
+    ++optimal_starts;
+
+    samaya::LpProblem other = lp;
+    for (samaya::Index j = 0; j < lp.n; ++j) {
+      other.cost[j] += std::uniform_real_distribution<double>(-2.0, 2.0)(rng);
+    }
+    samaya::Simplex nearby(other, options, quiet);
+    if (nearby.solve() != SimplexStatus::kOptimal) continue;
+    samaya::Simplex warm(lp, options, quiet);
+    REQUIRE(warm.solve(nearby.status()) == SimplexStatus::kOptimal);
+    CHECK_NEAR(objective(warm), objective(cold), 1e-6 * (1.0 + std::fabs(objective(cold))));
+    ++nearby_starts;
+  }
+  CHECK(optimal_starts > 60);
+  CHECK(nearby_starts > 40);
+}
+
 TEST(lp_random_large_models_verify_first_time) {
   // Larger sparse models where steepest-edge weight drift once produced false optima. The dense
   // reference is too slow at this size, so the verifier is the oracle: every outcome must be

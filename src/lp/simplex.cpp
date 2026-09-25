@@ -789,12 +789,51 @@ SimplexStatus Simplex::solve_dual_infeasible() {
   return status;
 }
 
-SimplexStatus Simplex::solve() {
+void Simplex::reset() {
   timer_ = Timer();
   iterations_ = 0;
   cost_ = lp_.cost;
   lower_ = lp_.lower;
   upper_ = lp_.upper;
+  std::fill(dse_weight_.begin(), dse_weight_.end(), 1.0);
+  std::fill(devex_weight_.begin(), devex_weight_.end(), 1.0);
+}
+
+SimplexStatus Simplex::solve(const std::vector<VarStatus>& start) {
+  if (start.size() != static_cast<std::size_t>(nt_) ||
+      std::count(start.begin(), start.end(), VarStatus::kBasic) != m_) {
+    return solve();
+  }
+  reset();
+  Index k = 0;
+  for (Index j = 0; j < nt_; ++j) {
+    VarStatus st = start[j];
+    // Keep nonbasic statuses consistent with the bounds.
+    const bool has_lower = lower_[j] > -kInf;
+    const bool has_upper = upper_[j] < kInf;
+    if (st == VarStatus::kAtLower && !has_lower) {
+      st = has_upper ? VarStatus::kAtUpper : VarStatus::kAtZero;
+    } else if (st == VarStatus::kAtUpper && !has_upper) {
+      st = has_lower ? VarStatus::kAtLower : VarStatus::kAtZero;
+    } else if (st == VarStatus::kAtZero && (has_lower || has_upper)) {
+      st = has_lower ? VarStatus::kAtLower : VarStatus::kAtUpper;
+    }
+    status_[j] = st;
+    if (st == VarStatus::kBasic) {
+      basic_[k] = j;
+      position_[j] = k++;
+    } else {
+      position_[j] = -1;
+      set_value_from_status(j);
+    }
+  }
+  if (!rebuild()) return solve();
+  correct_dual_infeasibilities();
+  return phase2();
+}
+
+SimplexStatus Simplex::solve() {
+  reset();
 
   // Slack basis.
   for (Index i = 0; i < m_; ++i) {

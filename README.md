@@ -9,15 +9,21 @@ for the architecture, algorithms, benchmarks and timeline.
 | Component | State |
 |---|---|
 | Model, sparse matrix (CSC), model statistics | done |
-| MPS / QPS reader (free + fixed, ranges, all common bound types, integer markers, QUADOBJ/QMATRIX) | done |
+| MPS / QPS reader (free + fixed with spaces in names, ranges, bound types, integer markers, QUADOBJ/QMATRIX) | done |
 | C++ API, C API, `samaya` CLI (`--stats`, `--json`, `--solution`) | done |
 | Scaling: geometric mean + equilibration, powers of two | done |
 | Sparse LU: Markowitz + threshold pivoting, Forrest–Tomlin updates | done |
 | Dual simplex: dual steepest edge, bound-flipping Harris ratio test, perturbation, phase 1 | done |
 | Primal simplex (Devex) for cleanup and unboundedness | done |
+| Warm start from a given basis; cleanup of unscaled infeasibilities | done |
 | Independent verifier: optimality, Farkas certificates, unbounded rays | done |
 | Presolve, hyper-sparse solves, barrier, PDLP (CPU + GPU) | phase 2–3 |
 | Branch-and-cut (MILP), QP | phase 3–4 |
+
+**Netlib: all 93 feasible instances solved, every objective matching HiGHS; 28 of the 29
+infeasible instances proven infeasible with a verified Farkas certificate** (the remaining one,
+`cplex2`, is infeasible by less than the tolerance and is reported as unproven). Per-instance
+results and timings: [docs/results/netlib.md](docs/results/netlib.md).
 
 LP models are solved by the dual simplex. Every optimal solution, infeasibility certificate and
 unbounded ray is checked by the independent verifier before it is reported; an outcome that does
@@ -60,9 +66,9 @@ C: see [`include/samaya_c.h`](include/samaya_c.h).
 ## Benchmarks
 
 ```sh
-bench/fetch_instances.sh netlib miplib              # downloads into bench/instances/
+bench/fetch_instances.sh netlib netlib-infeas miplib   # downloads into bench/instances/
 bench/generate_lps.py --scale 1                     # transportation, refinery planning, sparse
-bench/harness.py bench/instances/generated --baseline highspy --time-limit 300
+bench/harness.py bench/instances/netlib --baseline highspy --time-limit 300
 ```
 
 Baseline solvers (the `highs` executable or the `highspy` Python module) are run only for

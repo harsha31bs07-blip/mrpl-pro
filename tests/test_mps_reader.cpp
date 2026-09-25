@@ -189,6 +189,45 @@ TEST(mps_objsense_inline_and_crlf) {
   CHECK_EQ(m.num_rows(), 0);
 }
 
+// A fixed-MPS data line: fields start in columns 2, 5, 15, 25, 40 and 50.
+std::string fixed_line(const std::string& type, const std::string& f1, const std::string& f2 = "",
+                       const std::string& f3 = "", const std::string& f4 = "",
+                       const std::string& f5 = "") {
+  std::string line(61, ' ');
+  const std::string* fields[] = {&type, &f1, &f2, &f3, &f4, &f5};
+  const std::size_t start[] = {1, 4, 14, 24, 39, 49};
+  for (std::size_t f = 0; f < 6; ++f) line.replace(start[f], fields[f]->size(), *fields[f]);
+  line.erase(line.find_last_not_of(' ') + 1);
+  return line + "\n";
+}
+
+TEST(mps_fixed_format_names_with_spaces) {
+  const std::string text =
+      "NAME          FIXED\nROWS\n" + fixed_line("N", "COST") + fixed_line("L", "LIM 1") +
+      fixed_line("G", "MY ROW") + "COLUMNS\n" + fixed_line("", "MARKER", "'MARKER'", "", "'INTORG'") +
+      fixed_line("", "X ONE", "COST", "1.0", "LIM 1", "1.0") +
+      fixed_line("", "X ONE", "MY ROW", "1.0") +
+      fixed_line("", "MARKER", "'MARKER'", "", "'INTEND'") +
+      fixed_line("", "X TWO", "COST", "2.", "LIM 1", "1.") +
+      fixed_line("", "X TWO", "MY ROW", "-1.") + "RHS\n" +
+      fixed_line("", "RHS 1", "LIM 1", "4.", "MY ROW", "-2.") + "RANGES\n" +
+      fixed_line("", "RNG 1", "LIM 1", "3.") + "BOUNDS\n" + fixed_line("UP", "BND 1", "X TWO", "3.") +
+      "ENDATA\n";
+  const Model m = read_mps_from_string(text);
+  CHECK_EQ(m.num_rows(), 2);
+  CHECK_EQ(m.num_cols(), 2);
+  CHECK(m.col_names[0] == "X ONE");
+  CHECK(m.row_names[1] == "MY ROW");
+  CHECK(m.col_type[0] == samaya::VarType::kInteger);
+  CHECK(m.col_type[1] == samaya::VarType::kContinuous);
+  CHECK_EQ(m.obj[1], 2.0);
+  CHECK_EQ(m.row_lower[0], 1.0);
+  CHECK_EQ(m.row_upper[0], 4.0);
+  CHECK_EQ(m.row_lower[1], -2.0);
+  CHECK_EQ(m.col_upper[1], 3.0);
+  CHECK_EQ(m.A.nnz(), 4);
+}
+
 TEST(mps_errors_report_line_numbers) {
   try {
     read_mps_from_string("NAME X\nROWS\n N obj\nCOLUMNS\n x nosuchrow 1\nENDATA\n");
