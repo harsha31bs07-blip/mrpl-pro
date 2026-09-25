@@ -101,7 +101,8 @@ def run_scip(instance: Path, time_limit: float, threads: int, gap: float) -> dic
     wall = time.perf_counter() - start
     raw = m.getStatus()
     status = {"optimal": "optimal", "infeasible": "infeasible", "unbounded": "unbounded",
-              "inforunbd": "infeasible_or_unbounded", "timelimit": "time_limit"}.get(raw, raw)
+              "inforunbd": "infeasible_or_unbounded", "timelimit": "time_limit",
+              "gaplimit": "optimal"}.get(raw, raw)  # Stopped at the requested gap.
     objective = m.getObjVal() if m.getNSols() > 0 else None
     is_mip = any(v.vtype() != "CONTINUOUS" for v in m.getVars(transformed=False))
     return {"status": status, "objective": objective, "solve_seconds": wall, "wall_seconds": wall,
