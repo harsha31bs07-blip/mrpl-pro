@@ -14,6 +14,8 @@ namespace samaya {
 namespace {
 
 constexpr double kScoreFloor = 1e-6;
+constexpr double kStrongIterationShare = 0.5;
+constexpr double kStrongIterationOffset = 20000.0;
 // A solution replaces the incumbent only if it is better by this much (relative).
 constexpr double kMinImprovement = 1e-9;
 // Releasing the stored nodes when the search ends takes about 1 us per node (0.85 us measured on
@@ -216,6 +218,18 @@ double BranchAndBound::remaining_time() const {
 }
 
 bool BranchAndBound::time_up() const { return remaining_time() <= 0.0; }
+
+// Strong branching may use at most kStrongIterationShare of the node LP iterations plus
+// kStrongIterationOffset (as SCIP's reliability branching does); beyond that unreliable columns
+// are scored by their (average) pseudocosts. Without the cap strong branching took 88% of the
+// LP iterations on beasleyC3 and 77% on mc11.
+bool BranchAndBound::strong_budget_left() const {
+  const double node_iterations = static_cast<double>(
+      outcome_.lp_iterations - outcome_.strong_branching_iterations -
+      outcome_.heuristic_lp_iterations);
+  return static_cast<double>(outcome_.strong_branching_iterations) <
+         kStrongIterationShare * node_iterations + kStrongIterationOffset;
+}
 
 double BranchAndBound::pseudocost(Index j, bool up) const {
   const int d = up ? 1 : 0;
@@ -534,6 +548,7 @@ int BranchAndBound::separate_and_add_cuts() {
     }
   }
   separate_mir(ctx, candidates);
+  separate_aggregated_mir(ctx, candidates);
   separate_knapsack_covers(ctx, candidates);
 
   // Select the most efficacious cuts, skipping near-parallel ones.
@@ -742,7 +757,8 @@ Index BranchAndBound::select_branching(const std::vector<Index>& fractional,
     const Index j = c.col;
     double score = c.score;
     const bool reliable = std::min(pc_count_[0][j], pc_count_[1][j]) >= options_.reliability;
-    if (!reliable && strong < options_.max_strong_branching && !time_up()) {
+    if (!reliable && strong < options_.max_strong_branching && strong_budget_left() &&
+        !time_up()) {
       ++strong;
       const double lo = lower_[j];
       const double up = upper_[j];

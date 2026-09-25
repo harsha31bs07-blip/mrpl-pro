@@ -35,6 +35,11 @@ bool gomory_mixed_integer_cut(const CutContext& ctx, Index k, const std::vector<
 // Complemented mixed-integer rounding (c-MIR) cuts from single rows, trying several divisors.
 void separate_mir(const CutContext& ctx, std::vector<Cut>& cuts);
 
+// Aggregated c-MIR (Marchand and Wolsey): rows are combined to eliminate continuous columns far
+// from their bounds, and each aggregation is tried with bound substitution, including variable
+// bounds x <= c y and x >= c y on binaries (flow-cover strength on fixed-charge models).
+void separate_aggregated_mir(const CutContext& ctx, std::vector<Cut>& cuts);
+
 // Lifted (extended) knapsack cover cuts from rows over binary columns; other columns are
 // relaxed to their bounds.
 void separate_knapsack_covers(const CutContext& ctx, std::vector<Cut>& cuts);

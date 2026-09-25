@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <numeric>
 
 namespace samaya {
@@ -292,6 +293,371 @@ void separate_mir(const CutContext& ctx, std::vector<Cut>& cuts) {
           }
         }
         cuts.push_back(std::move(best));
+      }
+    }
+  }
+}
+
+namespace {
+
+// Aggregated c-MIR limits: starting rows per call, rows added to one aggregation, and the
+// smallest distance of a continuous column from its substituted bound worth eliminating.
+constexpr int kMaxAggregationStarts = 300;
+constexpr int kMaxAggregations = 5;
+constexpr double kMinBoundDistance = 1e-6;
+
+// A variable bound x_j <= coef * y (upper) or x_j >= coef * y (lower) with y binary, from a
+// two-entry row with right-hand side 0.
+struct VariableBound {
+  Index y = -1;
+  double coef = 0.0;
+};
+
+void find_variable_bounds(const CutContext& ctx, std::vector<VariableBound>& upper,
+                          std::vector<VariableBound>& lower) {
+  const Model& model = ctx.model;
+  const auto start = ctx.At.col_start();
+  const auto index = ctx.At.row_index();
+  const auto value = ctx.At.values();
+  upper.assign(static_cast<std::size_t>(model.num_cols()), {});
+  lower.assign(static_cast<std::size_t>(model.num_cols()), {});
+  for (Index i = 0; i < ctx.original_rows; ++i) {
+    if (start[i + 1] - start[i] != 2) continue;
+    for (int side = 0; side < 2; ++side) {
+      if ((side == 0 ? model.row_upper[i] : model.row_lower[i]) != 0.0) continue;
+      const double sign = side == 0 ? 1.0 : -1.0;  // sign * (a x + b y) <= 0.
+      for (int k = 0; k < 2; ++k) {
+        const Index j = index[start[i] + k];
+        const Index y = index[start[i] + 1 - k];
+        const double a = sign * value[start[i] + k];
+        const double b = sign * value[start[i] + 1 - k];
+        if (is_integer_col(model, j) || !is_integer_col(model, y) || ctx.lower[y] != 0.0 ||
+            ctx.upper[y] != 1.0 || a == 0.0) {
+          continue;
+        }
+        const double coef = -b / a;
+        if (a > 0.0) {  // x <= coef y
+          if (upper[j].y < 0 || coef < upper[j].coef) upper[j] = {y, coef};
+        } else {  // x >= coef y
+          if (lower[j].y < 0 || coef > lower[j].coef) lower[j] = {y, coef};
+        }
+      }
+    }
+  }
+}
+
+// sum_j coef_j x_j <= beta, built from original rows.
+struct Aggregate {
+  std::vector<double> coef;
+  std::vector<char> mark;
+  std::vector<Index> cols;
+  double beta = 0.0;
+
+  explicit Aggregate(Index n)
+      : coef(static_cast<std::size_t>(n), 0.0), mark(static_cast<std::size_t>(n), 0) {}
+  void clear() {
+    for (const Index j : cols) {
+      coef[j] = 0.0;
+      mark[j] = 0;
+    }
+    cols.clear();
+    beta = 0.0;
+  }
+  // Adds lambda times row i, using the side that keeps it a valid <= inequality.
+  bool add_row(const CutContext& ctx, Index i, double lambda) {
+    const double side = lambda > 0.0 ? ctx.model.row_upper[i] : ctx.model.row_lower[i];
+    if (!std::isfinite(side)) return false;
+    const auto start = ctx.At.col_start();
+    const auto index = ctx.At.row_index();
+    const auto value = ctx.At.values();
+    for (NnzIndex p = start[i]; p < start[i + 1]; ++p) {
+      const Index j = index[p];
+      if (!mark[j]) {
+        mark[j] = 1;
+        cols.push_back(j);
+      }
+      coef[j] += lambda * value[p];
+    }
+    beta += lambda * side;
+    return true;
+  }
+};
+
+// How a continuous column is replaced by a slack s >= 0 in the MIR: s = x - l, s = u - x,
+// s = c y - x (variable upper bound) or s = x - c y (variable lower bound).
+enum class Substitution : std::uint8_t { kLower, kUpper, kVub, kVlb };
+
+struct ContinuousChoice {
+  Substitution kind = Substitution::kLower;
+  double distance = kInf;  // The slack at the LP point.
+};
+
+ContinuousChoice choose_substitution(const CutContext& ctx, Index j,
+                                     const std::vector<VariableBound>& vub,
+                                     const std::vector<VariableBound>& vlb) {
+  const double xj = ctx.x[j];
+  ContinuousChoice best;
+  const auto consider = [&](Substitution kind, double distance) {
+    // Variable bounds win ties: they carry the binary into the cut (flow-cover strength).
+    const bool variable = kind == Substitution::kVub || kind == Substitution::kVlb;
+    if (distance < best.distance - 1e-12 || (variable && distance <= best.distance + 1e-12)) {
+      best = {kind, distance};
+    }
+  };
+  if (std::isfinite(ctx.lower[j])) consider(Substitution::kLower, xj - ctx.lower[j]);
+  if (std::isfinite(ctx.upper[j])) consider(Substitution::kUpper, ctx.upper[j] - xj);
+  if (vub[j].y >= 0) consider(Substitution::kVub, vub[j].coef * ctx.x[vub[j].y] - xj);
+  if (vlb[j].y >= 0) consider(Substitution::kVlb, xj - vlb[j].coef * ctx.x[vlb[j].y]);
+  return best;
+}
+
+// c-MIR on an aggregated row with bound substitution; the most efficacious cut over the
+// divisors, if any is violated.
+bool mir_on_aggregate(const CutContext& ctx, const Aggregate& agg,
+                      const std::vector<VariableBound>& vub, const std::vector<VariableBound>& vlb,
+                      CutBuilder& builder, Aggregate& ints_work, Cut& best) {
+  const Model& model = ctx.model;
+  struct ContTerm {
+    Index col;
+    double h;
+    double bound;
+    Substitution kind;
+  };
+  struct IntTerm {
+    Index col;
+    double c;
+    double t;
+    double bound;
+    bool at_upper;
+  };
+  std::vector<ContTerm> conts;
+  std::vector<IntTerm> ints;
+  ints_work.clear();
+  double beta = agg.beta;
+  for (const Index j : agg.cols) {
+    const double c = agg.coef[j];
+    if (c == 0.0) continue;
+    if (is_integer_col(model, j)) {
+      ints_work.coef[j] += c;
+      if (!ints_work.mark[j]) {
+        ints_work.mark[j] = 1;
+        ints_work.cols.push_back(j);
+      }
+      continue;
+    }
+    if (ctx.lower[j] == ctx.upper[j]) {
+      beta -= c * ctx.lower[j];
+      continue;
+    }
+    const ContinuousChoice choice = choose_substitution(ctx, j, vub, vlb);
+    if (!std::isfinite(choice.distance)) return false;
+    const auto add_int = [&](Index y, double v) {
+      ints_work.coef[y] += v;
+      if (!ints_work.mark[y]) {
+        ints_work.mark[y] = 1;
+        ints_work.cols.push_back(y);
+      }
+    };
+    switch (choice.kind) {
+      case Substitution::kLower:  // c x = c s + c l
+        beta -= c * ctx.lower[j];
+        conts.push_back({j, c, ctx.lower[j], choice.kind});
+        break;
+      case Substitution::kUpper:  // c x = -c s + c u
+        beta -= c * ctx.upper[j];
+        conts.push_back({j, -c, ctx.upper[j], choice.kind});
+        break;
+      case Substitution::kVub:  // c x = c v y - c s
+        add_int(vub[j].y, c * vub[j].coef);
+        conts.push_back({j, -c, 0.0, choice.kind});
+        break;
+      case Substitution::kVlb:  // c x = c v y + c s
+        add_int(vlb[j].y, c * vlb[j].coef);
+        conts.push_back({j, c, 0.0, choice.kind});
+        break;
+    }
+  }
+  for (const Index j : ints_work.cols) {
+    const double c = ints_work.coef[j];
+    const double lo = ctx.lower[j];
+    const double up = ctx.upper[j];
+    const double xj = ctx.x[j];
+    const bool use_lower = std::isfinite(lo) && (!std::isfinite(up) || xj - lo <= up - xj);
+    if (!use_lower && !std::isfinite(up)) return false;
+    const double b = use_lower ? lo : up;
+    beta -= c * b;
+    if (lo == up || c == 0.0) continue;
+    ints.push_back({j, use_lower ? c : -c, use_lower ? xj - lo : up - xj, b, !use_lower});
+  }
+  if (ints.empty()) return false;
+
+  std::vector<double> divisors;
+  for (const IntTerm& t : ints) {
+    if (t.t <= 1e-6) continue;
+    const double d = std::fabs(t.c);
+    if (d < 1e-6) continue;
+    if (std::none_of(divisors.begin(), divisors.end(),
+                     [&](double e) { return std::fabs(e - d) <= 1e-9 * d; })) {
+      divisors.push_back(d);
+    }
+    if (static_cast<int>(divisors.size()) >= kMaxMirDivisors) break;
+  }
+  const auto try_divisor = [&](double delta, Cut& out) {
+    const double scaled = beta / delta;
+    const double f = scaled - std::floor(scaled);
+    if (f < 0.05 || f > 0.95) return false;
+    double rhs = std::floor(scaled);
+    for (const IntTerm& t : ints) {
+      const double a = t.c / delta;
+      const double fa = a - std::floor(a);
+      const double coef = std::floor(a) + std::max(0.0, fa - f) / (1.0 - f);
+      if (coef == 0.0) continue;
+      const double x_coef = t.at_upper ? -coef : coef;
+      rhs += x_coef * t.bound;
+      builder.add(t.col, x_coef);
+    }
+    for (const ContTerm& s : conts) {
+      if (s.h >= 0.0) continue;
+      const double coef = s.h / (delta * (1.0 - f));
+      switch (s.kind) {
+        case Substitution::kLower:  // coef (x - l)
+          rhs += coef * s.bound;
+          builder.add(s.col, coef);
+          break;
+        case Substitution::kUpper:  // coef (u - x)
+          rhs -= coef * s.bound;
+          builder.add(s.col, -coef);
+          break;
+        case Substitution::kVub:  // coef (v y - x)
+          builder.add(vub[s.col].y, coef * vub[s.col].coef);
+          builder.add(s.col, -coef);
+          break;
+        case Substitution::kVlb:  // coef (x - v y)
+          builder.add(s.col, coef);
+          builder.add(vlb[s.col].y, -coef * vlb[s.col].coef);
+          break;
+      }
+    }
+    out = builder.take(rhs, -1.0);
+    return finalize_cut(ctx, out);
+  };
+  bool found = false;
+  double best_delta = 0.0;
+  for (const double delta : divisors) {
+    Cut c;
+    if (try_divisor(delta, c) && (!found || c.efficacy > best.efficacy)) {
+      best = std::move(c);
+      best_delta = delta;
+      found = true;
+    }
+  }
+  if (found) {
+    for (const double factor : {0.5, 0.25, 0.125}) {
+      Cut c;
+      if (try_divisor(best_delta * factor, c) && c.efficacy > best.efficacy) best = std::move(c);
+    }
+  }
+  return found;
+}
+
+// Distance of a continuous column from its nearer simple bound: which columns are worth
+// eliminating by aggregation (a column on a variable bound still counts as interior here, as in
+// SCIP's aggregation heuristic; the substitution then uses the variable bound).
+double simple_bound_distance(const CutContext& ctx, Index j) {
+  const double xj = ctx.x[j];
+  return std::min(std::isfinite(ctx.lower[j]) ? xj - ctx.lower[j] : kInf,
+                  std::isfinite(ctx.upper[j]) ? ctx.upper[j] - xj : kInf);
+}
+
+}  // namespace
+
+void separate_aggregated_mir(const CutContext& ctx, std::vector<Cut>& cuts) {
+  const Model& model = ctx.model;
+  const Index n = model.num_cols();
+  const auto rstart = ctx.At.col_start();
+  const auto cstart = model.A.col_start();
+  const auto cindex = model.A.row_index();
+  const auto cvalue = model.A.values();
+  std::vector<VariableBound> vub;
+  std::vector<VariableBound> vlb;
+  find_variable_bounds(ctx, vub, vlb);
+  std::vector<double> activity(static_cast<std::size_t>(model.num_rows()), 0.0);
+  model.A.multiply(ctx.x, activity);
+
+  // Starting rows: those with a continuous column away from its substituted bound.
+  std::vector<Index> starts;
+  for (Index i = 0; i < ctx.original_rows && static_cast<int>(starts.size()) <
+                                                 kMaxAggregationStarts; ++i) {
+    if (rstart[i + 1] - rstart[i] > kMaxRowLength) continue;
+    const auto index = ctx.At.row_index();
+    for (NnzIndex p = rstart[i]; p < rstart[i + 1]; ++p) {
+      const Index j = index[p];
+      if (!is_integer_col(model, j) && simple_bound_distance(ctx, j) > kMinBoundDistance) {
+        starts.push_back(i);
+        break;
+      }
+    }
+  }
+  CutBuilder builder(ctx);
+  Aggregate agg(n);
+  Aggregate ints_work(n);
+  std::vector<Index> used;
+
+  for (const Index i0 : starts) {
+    // The side the LP point is closer to (both for equalities: the upper one).
+    const double ru = model.row_upper[i0];
+    const double rl = model.row_lower[i0];
+    for (int side = 0; side < 2; ++side) {
+      const double lambda = side == 0 ? 1.0 : -1.0;
+      if (!std::isfinite(side == 0 ? ru : rl)) continue;
+      if (rl == ru && side == 1) continue;  // An equality aggregates the same both ways.
+      agg.clear();
+      agg.add_row(ctx, i0, lambda);
+      used.assign(1, i0);
+      for (int step = 0; step <= kMaxAggregations; ++step) {
+        Cut cut;
+        if (mir_on_aggregate(ctx, agg, vub, vlb, builder, ints_work, cut)) {
+          cuts.push_back(std::move(cut));
+          break;
+        }
+        if (step == kMaxAggregations) break;
+        // Eliminate the continuous column farthest from its bound.
+        Index pick = -1;
+        double pick_distance = kMinBoundDistance;
+        for (const Index j : agg.cols) {
+          if (agg.coef[j] == 0.0 || is_integer_col(model, j)) continue;
+          const double d = simple_bound_distance(ctx, j);
+          if (d > pick_distance) {
+            pick_distance = d;
+            pick = j;
+          }
+        }
+        if (pick < 0) break;
+        // With the tightest row containing it that is not used yet.
+        Index row = -1;
+        double row_lambda = 0.0;
+        double row_slack = kInf;
+        for (NnzIndex p = cstart[pick]; p < cstart[pick + 1]; ++p) {
+          const Index i = cindex[p];
+          if (i >= ctx.original_rows || cvalue[p] == 0.0 ||
+              std::find(used.begin(), used.end(), i) != used.end() ||
+              rstart[i + 1] - rstart[i] > kMaxRowLength) {
+            continue;
+          }
+          const double l = -agg.coef[pick] / cvalue[p];
+          const double bound = l > 0.0 ? model.row_upper[i] : model.row_lower[i];
+          if (!std::isfinite(bound)) continue;
+          const double slack = std::fabs(bound - activity[i]);
+          if (slack < row_slack) {
+            row_slack = slack;
+            row = i;
+            row_lambda = l;
+          }
+        }
+        if (row < 0) break;
+        agg.add_row(ctx, row, row_lambda);
+        agg.coef[pick] = 0.0;  // Eliminated exactly.
+        used.push_back(row);
       }
     }
   }
