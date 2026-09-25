@@ -240,6 +240,18 @@ bool BranchAndBound::strong_budget_left() const {
          kStrongIterationShare * node_iterations + kStrongIterationOffset;
 }
 
+// The child to plunge into: the one with the smaller pseudocost estimate of the bound
+// degradation (children[0] is the down branch, children[1] the up branch); ties go to the side
+// the LP value is closer to.
+std::size_t BranchAndBound::plunge_child(const std::vector<Node>& children) const {
+  const Index j = children[0].branch_col;
+  const double down = pseudocost(j, false) * children[0].branch_distance;
+  const double up = pseudocost(j, true) * children[1].branch_distance;
+  if (down < up) return 0;
+  if (up < down) return 1;
+  return children[0].branch_distance >= 0.5 ? 1 : 0;
+}
+
 double BranchAndBound::pseudocost(Index j, bool up) const {
   const int d = up ? 1 : 0;
   if (pc_count_[d][j] > 0) return pc_sum_[d][j] / pc_count_[d][j];
@@ -1206,7 +1218,7 @@ MipOutcome BranchAndBound::solve() {
       continue;
     }
     // Plunge into the child on the side the value is closer to; queue the other.
-    const std::size_t dive = children[0].branch_distance >= 0.5 ? 1 : 0;
+    const std::size_t dive = plunge_child(children);
     Node& other = children[1 - dive];
     Node& next = children[dive];
     if (!dive_stack_.empty() || open_.size() >= options_.max_open_nodes_soft) {

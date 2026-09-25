@@ -177,6 +177,7 @@ class BranchAndBound {
                          double objective, const std::vector<VarStatus>& basis,
                          bool& node_infeasible, BoundChange& tighten, bool& has_tighten);
   bool strong_budget_left() const;
+  std::size_t plunge_child(const std::vector<Node>& children) const;
   double pseudocost(Index j, bool up) const;
   void record_pseudocost(Index j, bool up, double gain, double distance);
   double cutoff() const;

@@ -203,7 +203,7 @@ void BranchAndBound::worker_loop(Shared& sh) {
       current.reset();
       continue;
     }
-    const std::size_t dive = children[0].branch_distance >= 0.5 ? 1 : 0;
+    const std::size_t dive = plunge_child(children);
     Node& other = children[1 - dive];
     Node& next = children[dive];
     if (!dive_stack_.empty() || shared_stored_ >= options_.max_open_nodes_soft) {
