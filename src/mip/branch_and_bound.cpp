@@ -271,11 +271,15 @@ bool BranchAndBound::propagate(std::vector<Index> changed, std::vector<BoundChan
     double max_fin = 0.0;
     int min_inf = 0;
     int max_inf = 0;
+    double max_range = 0.0;  // Largest |a_j| (u_j - l_j) over the integer columns.
     for (NnzIndex p = rstart[i]; p < rstart[i + 1]; ++p) {
       const Index j = rindex[p];
       const double a = rval[p];
       const double lo = a > 0.0 ? lower_[j] : upper_[j];
       const double up = a > 0.0 ? upper_[j] : lower_[j];
+      if (model_.col_type[j] == VarType::kInteger) {
+        max_range = std::max(max_range, std::fabs(a) * (upper_[j] - lower_[j]));
+      }
       if (std::isfinite(lo)) {
         min_fin += a * lo;
       } else {
@@ -293,6 +297,11 @@ bool BranchAndBound::propagate(std::vector<Index> changed, std::vector<BoundChan
       feasible = false;
       break;
     }
+    // A side tightens column j only if its slack is below |a_j| (u_j - l_j): skip the row when
+    // both sides have more slack than the largest such range.
+    const bool upper_slack = ru == kInf || (min_inf == 0 && ru - min_fin >= max_range);
+    const bool lower_slack = rl == -kInf || (max_inf == 0 && max_fin - rl >= max_range);
+    if (upper_slack && lower_slack) continue;
     for (NnzIndex p = rstart[i]; p < rstart[i + 1]; ++p) {
       const Index j = rindex[p];
       if (model_.col_type[j] != VarType::kInteger) continue;
