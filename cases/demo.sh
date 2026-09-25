@@ -12,7 +12,11 @@ cd "$(dirname "$0")/.."
 size="${1:-small}"
 samaya="${2:-build/release/apps/cli/samaya}"
 out="cases/instances"
-[[ -x "${samaya}" ]] || { echo "solver not found: ${samaya} (cmake --preset release && cmake --build --preset release)" >&2; exit 1; }
+if [[ ! -x "${samaya}" ]]; then
+  echo "solver not found: ${samaya}" >&2
+  echo "build it with: cmake --preset release && cmake --build --preset release" >&2
+  exit 1
+fi
 
 python3 cases/mrpl.py generate --out "${out}" > /dev/null
 for family in plan crude utility; do

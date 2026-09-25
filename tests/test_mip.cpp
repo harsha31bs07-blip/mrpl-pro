@@ -197,6 +197,64 @@ Model set_partitioning(std::mt19937& rng) {
   return model;
 }
 
+// Fixed-charge facility location: open y_i (binary, fixed cost), ship x_ij <= d_j y_i
+// (variable upper bounds), meet each demand, and respect capacities sum_j x_ij <= cap_i y_i.
+Model fixed_charge(std::mt19937& rng) {
+  const auto uniform_int = [&](int lo, int hi) {
+    return std::uniform_int_distribution<int>(lo, hi)(rng);
+  };
+  const int facilities = uniform_int(2, 4);
+  const int customers = uniform_int(2, 4);
+  Model model;
+  std::vector<samaya::Triplet> t;
+  std::vector<double> demand;
+  double total = 0.0;
+  for (int j = 0; j < customers; ++j) {
+    demand.push_back(uniform_int(3, 12) + 0.5 * uniform_int(0, 1));
+    total += demand.back();
+  }
+  const auto y = [&](int i) { return static_cast<Index>(i); };
+  const auto x = [&](int i, int j) { return static_cast<Index>(facilities + i * customers + j); };
+  for (int i = 0; i < facilities; ++i) {
+    model.obj.push_back(uniform_int(10, 40));
+    model.col_lower.push_back(0);
+    model.col_upper.push_back(1);
+    model.col_type.push_back(samaya::VarType::kInteger);
+  }
+  for (int i = 0; i < facilities; ++i) {
+    for (int j = 0; j < customers; ++j) {
+      model.obj.push_back(uniform_int(1, 9));
+      model.col_lower.push_back(0);
+      model.col_upper.push_back(kInf);
+      model.col_type.push_back(samaya::VarType::kContinuous);
+    }
+  }
+  Index row = 0;
+  for (int j = 0; j < customers; ++j, ++row) {
+    for (int i = 0; i < facilities; ++i) t.push_back({row, x(i, j), 1.0});
+    model.row_lower.push_back(demand[j]);
+    model.row_upper.push_back(demand[j]);
+  }
+  for (int i = 0; i < facilities; ++i, ++row) {
+    const double cap = std::floor(total * (0.4 + 0.1 * uniform_int(0, 6)));
+    for (int j = 0; j < customers; ++j) t.push_back({row, x(i, j), 1.0});
+    t.push_back({row, y(i), -cap});
+    model.row_lower.push_back(-kInf);
+    model.row_upper.push_back(0.0);
+  }
+  for (int i = 0; i < facilities; ++i) {
+    for (int j = 0; j < customers; ++j, ++row) {
+      t.push_back({row, x(i, j), 1.0});
+      t.push_back({row, y(i), -demand[j]});
+      model.row_lower.push_back(-kInf);
+      model.row_upper.push_back(0.0);
+    }
+  }
+  model.A = samaya::SparseMatrix::from_triplets(row, static_cast<Index>(model.obj.size()),
+                                                std::move(t));
+  return model;
+}
+
 }  // namespace
 
 TEST(mip_heuristics_find_solutions_at_the_root) {
@@ -364,6 +422,43 @@ TEST(mip_root_reductions_keep_an_optimal_solution) {
   CHECK_EQ(violations, 0);
   CHECK(models > 400);
   CHECK(reductions > 50);
+}
+
+TEST(mip_cuts_on_fixed_charge_models) {
+  // Fixed-charge facility location (big-M rows x <= u y): no cut may separate a known optimal
+  // solution, and the cuts must tighten the root.
+  const samaya::Logger quiet(0);
+  std::mt19937 rng(71);
+  long long violations = 0;
+  int models = 0;
+  int tightened = 0;
+  double closed = 0.0;
+  for (int k = 0; k < 150; ++k) {
+    const Model model = fixed_charge(rng);
+    const ReferenceMilpResult ref = samaya::test::reference_milp(model);
+    if (ref.status != ReferenceMilpResult::Status::kOptimal) continue;
+    samaya::MipOptions options;
+    options.rel_gap = 0.0;
+    options.abs_gap = 1e-9;
+    options.probing = false;
+    options.debug_solution = ref.x;
+    const samaya::MipOutcome out = samaya::BranchAndBound(model, options, quiet).solve();
+    ++models;
+    violations += out.debug_cut_violations;
+    CHECK(out.status == Status::kOptimal);
+    CHECK(std::fabs(out.objective - ref.objective) <= 1e-6 * (1 + std::fabs(ref.objective)));
+    const double gap = ref.objective - out.root_bound;
+    if (gap > 1e-6 && out.root_bound_cuts > out.root_bound + 1e-6) {
+      ++tightened;
+      closed += (out.root_bound_cuts - out.root_bound) / gap;
+    }
+  }
+  std::printf("  %d fixed-charge models, %d root bounds tightened (%.0f%% of the gap closed on "
+              "average), %lld violations\n", models, tightened,
+              tightened > 0 ? 100.0 * closed / tightened : 0.0, violations);
+  CHECK_EQ(violations, 0);
+  CHECK(models > 100);
+  CHECK(tightened > models / 2);
 }
 
 TEST(mip_random_models_match_reference_without_cuts) {
