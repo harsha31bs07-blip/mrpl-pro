@@ -2,8 +2,11 @@
 //
 // Supports the sections NAME, OBJSENSE, OBJNAME, ROWS, COLUMNS (with INTORG/INTEND markers),
 // RHS, RANGES, BOUNDS (UP LO FX FR MI PL BV LI UI), QUADOBJ, QMATRIX, QSECTION (objective only)
-// and ENDATA. Fields are whitespace-separated, so both free MPS and fixed MPS without spaces in
-// names are accepted. Section headers start in column 1; data lines start with whitespace.
+// and ENDATA. Section headers start in column 1; data lines start with whitespace.
+//
+// The file is first read as free MPS (whitespace-separated fields). If that fails, it is read
+// again as fixed MPS, where data fields sit in columns 2-3, 5-12, 15-22, 25-36, 40-47 and 50-61
+// and names may contain spaces (Netlib's FORPLAN, for example).
 //
 // Conventions (matching common practice in CPLEX / Gurobi / HiGHS readers):
 //   * The first N row is the objective unless OBJNAME names another; other N rows are dropped.
@@ -16,6 +19,7 @@
 #include <charconv>
 #include <cstdint>
 #include <fstream>
+#include <iterator>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -56,6 +60,8 @@ bool iequals(std::string_view a, std::string_view b) {
 
 class MpsParser {
  public:
+  explicit MpsParser(bool fixed_format) : fixed_(fixed_format) {}
+
   Model parse(std::string_view text) {
     std::size_t pos = 0;
     while (pos <= text.size() && section_ != Section::kEnd) {
@@ -85,6 +91,21 @@ class MpsParser {
     }
   }
 
+  // Fixed MPS: the type field (columns 2-3) and five data fields, trimmed; empty fields are
+  // skipped, which leaves the same token layout as free MPS.
+  void tokenize_fixed(std::string_view line) {
+    static constexpr std::size_t kStart[] = {1, 4, 14, 24, 39, 49};
+    static constexpr std::size_t kEnd[] = {3, 12, 22, 36, 47, 61};
+    tokens_.clear();
+    for (std::size_t f = 0; f < std::size(kStart); ++f) {
+      if (kStart[f] >= line.size()) break;
+      std::string_view field = line.substr(kStart[f], std::min(kEnd[f], line.size()) - kStart[f]);
+      while (!field.empty() && (field.front() == ' ' || field.front() == '\t')) field.remove_prefix(1);
+      while (!field.empty() && (field.back() == ' ' || field.back() == '\t')) field.remove_suffix(1);
+      if (!field.empty()) tokens_.push_back(field);
+    }
+  }
+
   double number(std::string_view s) const {
     if (!s.empty() && s.front() == '+') s.remove_prefix(1);
     double v = 0.0;
@@ -99,9 +120,14 @@ class MpsParser {
 
   void parse_line(std::string_view line) {
     if (line.empty() || line.front() == '*') return;
-    tokenize(line);
+    const bool header = line.front() != ' ' && line.front() != '\t';
+    if (fixed_ && !header) {
+      tokenize_fixed(line);
+    } else {
+      tokenize(line);
+    }
     if (tokens_.empty()) return;
-    if (line.front() != ' ' && line.front() != '\t') {
+    if (header) {
       parse_header();
     } else {
       parse_data();
@@ -397,6 +423,7 @@ class MpsParser {
     return std::move(model_);
   }
 
+  bool fixed_;
   Model model_;
   Section section_ = Section::kNone;
   long long line_no_ = 0;
@@ -420,7 +447,17 @@ class MpsParser {
 
 }  // namespace
 
-Model read_mps_from_string(std::string_view text) { return MpsParser().parse(text); }
+Model read_mps_from_string(std::string_view text) {
+  try {
+    return MpsParser(/*fixed_format=*/false).parse(text);
+  } catch (const ParseError& free_error) {
+    try {
+      return MpsParser(/*fixed_format=*/true).parse(text);
+    } catch (const ParseError&) {
+      throw free_error;  // The free-format message is usually the more useful one.
+    }
+  }
+}
 
 Model read_mps(const std::string& path) {
   std::ifstream in(path, std::ios::binary);

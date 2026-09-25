@@ -72,6 +72,10 @@ class Simplex {
   Simplex(const LpProblem& lp, const SimplexOptions& options, const Logger& log);
 
   SimplexStatus solve();
+  // Starts from the given variable statuses (n + m, exactly m basic) instead of the slack basis:
+  // bounds are restored, dual infeasibilities are removed by bound flips and cost shifts, and the
+  // dual simplex continues. Falls back to solve() if the statuses do not form a usable basis.
+  SimplexStatus solve(const std::vector<VarStatus>& start);
 
   // All vectors are in the (scaled) space of the LpProblem.
   const std::vector<double>& values() const { return x_; }         // n + m.
@@ -94,6 +98,7 @@ class Simplex {
  private:
   enum class LoopResult : std::uint8_t { kDone, kLostFeasibility };
 
+  void reset();
   bool rebuild();
   void compute_primal();
   void compute_dual();
