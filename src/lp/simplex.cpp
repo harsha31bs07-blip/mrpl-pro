@@ -446,7 +446,7 @@ SimplexStatus Simplex::dual_loop() {
     return SimplexStatus::kNumericalError;
   }
   correct_dual_infeasibilities();
-  bool fresh = factor_.num_updates() == 0;
+  bool fresh = true;
   const auto refresh = [&] {
     if (!rebuild()) return false;
     correct_dual_infeasibilities();
@@ -462,7 +462,13 @@ SimplexStatus Simplex::dual_loop() {
     const Index r = choose_leaving_row();
     if (r < 0) {
       if (fresh) return SimplexStatus::kOptimal;
-      if (!refresh()) return SimplexStatus::kNumericalError;
+      // Confirm optimality on values recomputed from scratch with the current factorization
+      // (its updates are bounded by the refactorization interval) instead of refactorizing:
+      // that was one factorization per node LP.
+      compute_primal();
+      compute_dual();
+      correct_dual_infeasibilities();
+      fresh = true;
       continue;
     }
     const Index p = basic_[r];
