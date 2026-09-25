@@ -7,8 +7,8 @@ The figures are public, order-of-magnitude values for a 15 MMTPA coastal refiner
 
 Families:
   plan      multi-period refinery planning (LP): crude slate from a set of assayed crudes;
-            CDU with crude-dependent straight-run yields and sulfur; VDU; FCC, hydrocracker,
-            naphtha reformer and diesel hydrotreater (DHDS); product blending to BS-VI
+            CDU with crude-dependent straight-run yields and a blend sulfur limit; VDU;
+            FCC, hydrocracker, naphtha reformer and diesel hydrotreater (DHDS); blending to BS-VI
             specifications (diesel sulfur <= 10 ppm, gasoline RON >= 91 and sulfur <= 10 ppm);
             product tanks; domestic demand and export at a discount.
   crude     crude receipt scheduling (MILP): cargoes with arrival windows at one single-point
@@ -46,12 +46,10 @@ CRUDES = [
     ("das_blend", 39.0, 1.1, 5050.0),
 ]
 
-# Straight-run cuts. Yields interpolate between a heavy (API 28) and a light (API 40) crude;
-# sulfur factor = sulfur of the cut / sulfur of the crude.
+# Straight-run cuts. Yields interpolate between a heavy (API 28) and a light (API 40) crude.
 CUTS = ["lpg", "naphtha", "kero", "gasoil", "vgo", "residue"]
 YIELD_HEAVY = [0.010, 0.120, 0.110, 0.220, 0.250, 0.290]
 YIELD_LIGHT = [0.025, 0.230, 0.150, 0.250, 0.200, 0.145]
-SULFUR_FACTOR = [0.0, 0.05, 0.20, 0.70, 1.20, 1.90]
 
 # Products: name, domestic price (lakh Rs per kt), domestic demand share of crude run,
 # export discount.
@@ -102,7 +100,8 @@ def plan(crudes: int, periods: int, rng: random.Random) -> MpsWriter:
         for u in cap:
             lp.col(f"feed_{u}_{t}", cost=-op_cost[u])
         # Streams.
-        for s in ["ln_to_gasoline", "ln_to_naphtha", "hn_to_reformer", "hn_to_naphtha", "vgo_vdu", "vacuum_residue", "light_naphtha", "heavy_naphtha", "gasoil_to_dhds",
+        for s in ["ln_to_gasoline", "ln_to_naphtha", "hn_to_reformer", "hn_to_naphtha",
+                  "vgo_vdu", "vacuum_residue", "light_naphtha", "heavy_naphtha", "gasoil_to_dhds",
                   "kero_to_atf", "kero_to_dhds", "lco_to_dhds", "lco_to_fo", "vgo_to_fcc",
                   "vgo_to_hcu", "residue_to_vdu", "residue_to_fo", "vr_to_bitumen", "vr_to_fo",
                   "slurry_to_fo", "hcu_naphtha", "hcu_kero", "hcu_diesel", "dhds_diesel",
