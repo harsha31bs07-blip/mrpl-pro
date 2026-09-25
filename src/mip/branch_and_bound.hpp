@@ -46,6 +46,8 @@ struct MipOptions {
   long long parallel_start_nodes = 200;
   // Root reductions for integer columns: coefficient tightening and probing on binaries.
   bool probing = true;
+  // Restart once after the root when it fixed a large share of the integer columns.
+  bool restart = true;
   bool sub_mip_heuristics = true;
   // Only solutions strictly better than this objective (in the model's sense) are accepted; the
   // search prunes against it as if it were an incumbent. Used by the sub-MIPs.
@@ -72,6 +74,7 @@ struct MipOutcome {
   long long heuristic_lp_iterations = 0;  // Diving and feasibility-pump LPs (part of lp_iterations).
   int threads_used = 1;
   long long reduced_cost_fixings = 0;  // Column bounds tightened by reduced costs.
+  bool restarted = false;              // The search restarted after the root.
   int cut_rounds = 0;
   int cuts_added = 0;             // Cuts in the LP after the root (non-binding ones removed).
   double root_bound = -kInf;      // Root LP bound before and after cuts, in the model's sense.
@@ -131,6 +134,8 @@ class BranchAndBound {
   SimplexStatus solve_relaxation(const std::vector<VarStatus>* start, long long iteration_limit);
   double relaxation_objective() const;
   std::vector<VarStatus> current_basis() const;
+
+  MipOutcome restart();
 
   // Parallel tree search (parallel.cpp).
   struct Shared;

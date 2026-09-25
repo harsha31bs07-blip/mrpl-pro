@@ -2,6 +2,7 @@
 
 #include "mip/cuts.hpp"
 #include "mip/search_constants.hpp"
+#include "presolve/presolve.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -14,6 +15,10 @@ namespace samaya {
 namespace {
 
 constexpr double kScoreFloor = 1e-6;
+// The search restarts after the root when at least this share of the integer columns was fixed
+// there (by propagation, strong branching and reduced costs): the fixings are presolved away and
+// the smaller model gets its own root cuts and heuristics.
+constexpr double kRestartFraction = 0.2;
 // Reduced-cost fixing ignores reduced costs below this and allows this relative slack on the
 // cutoff for the LP's tolerances.
 constexpr double kReducedCostTol = 1e-7;
@@ -935,6 +940,12 @@ BranchAndBound::NodeResult BranchAndBound::process_node(Node& node, std::vector<
       return NodeResult::kPruned;
     }
     reduced_cost_fixing(node, objective, reduced, *basis);
+    if (node.depth == 0 && round == 0) {
+      std::size_t fixed = 0;
+      for (const Index j : integers_) fixed += lower_[j] == upper_[j];
+      log_.log(1, "MIP root: %zu of %zu integers fixed, %lld reduced-cost fixings", fixed,
+               integers_.size(), outcome_.reduced_cost_fixings);
+    }
 
     bool infeasible = false;
     bool has_tighten = false;
@@ -981,6 +992,86 @@ BranchAndBound::NodeResult BranchAndBound::process_node(Node& node, std::vector<
     children.push_back(std::move(up));
     return NodeResult::kBranched;
   }
+}
+
+// Solves the model under the root node's bounds (valid everywhere: they come from the root) as a
+// new, presolved search with the incumbent as its cutoff, and maps the result back.
+MipOutcome BranchAndBound::restart() {
+  const Timer timer;
+  Model sub = model_;
+  sub.col_lower = lower_;
+  sub.col_upper = upper_;
+  PresolveOptions presolve_options;
+  presolve_options.mip = true;
+  presolve_options.integrality_tol = options_.integrality_tol;
+  Presolve presolve(sub, presolve_options);
+  const bool infeasible = presolve.run() == PresolveStatus::kInfeasible;
+  MipOutcome out;
+  if (infeasible) {
+    out.status = Status::kInfeasible;
+  } else if (presolve.reduced().num_cols() == 0) {
+    out.status = Status::kOptimal;
+    out.x.clear();
+    std::vector<double> x;
+    std::vector<double> unused_y;
+    presolve.postsolve({}, {}, x, unused_y);
+    if (try_solution(std::move(x))) ++outcome_.heuristic_solutions;
+  } else {
+    MipOptions options = options_;
+    options.restart = false;
+    options.time_limit = std::max(0.0, remaining_time());
+    if (options.node_limit >= 0) {
+      options.node_limit = std::max(0LL, options.node_limit - outcome_.nodes);
+    }
+    options.debug_solution.clear();
+    options.objective_cutoff.reset();
+    if (incumbent_value_ < kInf) options.objective_cutoff = sense_ * incumbent_value_;
+    BranchAndBound search(presolve.reduced(), options, log_);
+    out = search.solve();
+    if (!out.x.empty()) {
+      std::vector<double> x;
+      std::vector<double> unused_y;
+      presolve.postsolve(out.x, {}, x, unused_y);
+      try_solution(std::move(x));
+    }
+    outcome_.nodes += out.nodes;
+    outcome_.lp_iterations += out.lp_iterations;
+    outcome_.strong_branching_iterations += out.strong_branching_iterations;
+    outcome_.heuristic_solutions += out.heuristic_solutions;
+    outcome_.heuristic_lp_iterations += out.heuristic_lp_iterations;
+    outcome_.reduced_cost_fixings += out.reduced_cost_fixings;
+    outcome_.threads_used = out.threads_used;
+  }
+  outcome_.restarted = true;
+  // The restarted search either completed (optimal / infeasible: nothing better than the
+  // incumbent exists) or stopped with a bound valid for the whole model.
+  double bound = kInf;
+  switch (out.status) {
+    case Status::kOptimal:
+    case Status::kInfeasible:
+      outcome_.status = incumbent_.empty() ? Status::kInfeasible : Status::kOptimal;
+      bound = incumbent_value_;
+      break;
+    case Status::kTimeLimit:
+    case Status::kNodeLimit:
+      outcome_.status = out.status;
+      bound = std::min(sense_ * out.bound, incumbent_value_);
+      break;
+    default:
+      outcome_.status = out.status;
+      bound = -kInf;
+      break;
+  }
+  outcome_.bound = sense_ * bound;
+  if (!incumbent_.empty()) {
+    outcome_.x = incumbent_;
+    outcome_.objective = sense_ * incumbent_value_;
+  } else {
+    outcome_.objective = sense_ * kInf;
+  }
+  log_.log(1, "MIP: restarted search %s after %lld nodes, %.2f s", to_string(out.status),
+           out.nodes, timer.seconds());
+  return outcome_;
 }
 
 MipOutcome BranchAndBound::solve() {
@@ -1079,6 +1170,19 @@ MipOutcome BranchAndBound::solve() {
     ++outcome_.nodes;
     std::vector<Node> children;
     const NodeResult result = process_node(*current, children);
+    if (result == NodeResult::kBranched && current->depth == 0 && options_.restart &&
+        shared_ == nullptr) {
+      std::size_t fixed = 0;
+      for (const Index j : integers_) {
+        fixed += lower_[j] == upper_[j] && root_lower_[j] < root_upper_[j];
+      }
+      if (static_cast<double>(fixed) >=
+          kRestartFraction * static_cast<double>(integers_.size())) {
+        log_.log(1, "MIP: restart after the root, %zu of %zu integers fixed", fixed,
+                 integers_.size());
+        return restart();
+      }
+    }
     if (log_.level() >= 1 && timer_.seconds() - last_log >= 5.0) {
       last_log = timer_.seconds();
       const double bound = best_bound(current->bound);

@@ -684,6 +684,56 @@ TEST(mip_flow_cover_separates_single_node_big_m) {
   CHECK(best_violation > 0.5);  // y1 + y2 + y3 >= 1 is violated by 1 - 7/1000.
 }
 
+TEST(mip_restart_after_root_matches_reference) {
+  // Knapsacks with 18-22 items: once the root heuristics find a good solution, reduced-cost
+  // fixing fixes many items at the root and the search restarts on the presolved rest. The
+  // result must match the reference, whether or not it restarted.
+  const samaya::Logger quiet(0);
+  std::mt19937 rng(61);
+  int restarted = 0;
+  int failures = 0;
+  int models = 0;
+  for (int k = 0; k < 60; ++k) {
+    const auto uniform_int = [&](int lo, int hi) {
+      return std::uniform_int_distribution<int>(lo, hi)(rng);
+    };
+    Model model;
+    model.sense = samaya::ObjSense::kMaximize;
+    const int n = uniform_int(18, 22);
+    std::vector<samaya::Triplet> t;
+    double total = 0.0;
+    for (int j = 0; j < n; ++j) {
+      const int w = uniform_int(5, 40);
+      model.obj.push_back(w * uniform_int(8, 12) / 10.0 + uniform_int(0, 3));
+      model.col_lower.push_back(0);
+      model.col_upper.push_back(1);
+      model.col_type.push_back(samaya::VarType::kInteger);
+      t.push_back({0, j, static_cast<double>(w)});
+      total += w;
+    }
+    model.row_lower = {-kInf};
+    model.row_upper = {std::floor(total * 0.45)};
+    model.A = samaya::SparseMatrix::from_triplets(1, n, std::move(t));
+    const ReferenceMilpResult ref = samaya::test::reference_milp(model);
+    if (ref.status != ReferenceMilpResult::Status::kOptimal) continue;
+    ++models;
+    samaya::MipOptions options;
+    options.rel_gap = 0.0;
+    options.abs_gap = 1e-9;
+    const samaya::MipOutcome out = samaya::BranchAndBound(model, options, quiet).solve();
+    restarted += out.restarted;
+    if (out.status != Status::kOptimal ||
+        std::fabs(out.objective - ref.objective) > 1e-6 * (1 + std::fabs(ref.objective)) ||
+        std::fabs(out.bound - out.objective) > 1e-6 * (1 + std::fabs(ref.objective))) {
+      ++failures;
+    }
+  }
+  std::printf("  %d knapsacks, %d restarted, %d failures\n", models, restarted, failures);
+  CHECK_EQ(failures, 0);
+  CHECK(models > 40);
+  CHECK(restarted > 5);
+}
+
 TEST(mip_random_models_match_reference_without_cuts) {
   std::mt19937 rng(21);
   samaya::Params params;
