@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Runs an instance list in parallel single-threaded shards and checks the results against the
-# MIPLIB known solutions.
+# Runs an instance list in parallel shards (single-threaded by default) and checks the results
+# against the MIPLIB known solutions.
 #
-#   bench/run_miplib.sh [SHARDS] [SECONDS] [LIST] [SAMAYA] [OUT]
+#   bench/run_miplib.sh [SHARDS] [SECONDS] [LIST] [SAMAYA] [OUT] [THREADS]
 #
 #   SHARDS   parallel runs (default 4; use the number of performance cores, fewer if RAM < 4 GB
 #            per shard)
@@ -11,6 +11,7 @@
 #            bench/fetch_instances.sh miplib-list bench/miplib_small.test)
 #   SAMAYA   solver binary (default build/release/apps/cli/samaya)
 #   OUT      output directory for the per-shard CSV and logs (default bench/results/miplib)
+#   THREADS  tree-search threads per run (default 1); keep SHARDS x THREADS <= cores
 #
 # Prints the per-shard summaries; bench/report.py OUT/shard*.csv makes a table.
 set -euo pipefail
@@ -21,6 +22,7 @@ seconds="${2:-600}"
 list="${3:-bench/miplib_small.test}"
 samaya="${4:-build/release/apps/cli/samaya}"
 out="${5:-bench/results/miplib}"
+threads="${6:-1}"
 dir="bench/instances/$(basename "${list%.*}")"
 
 [[ -x "${samaya}" ]] || { echo "solver not found: ${samaya}" >&2; exit 1; }
@@ -33,7 +35,7 @@ for ((k = 0; k < shards; ++k)); do
   for ((i = k; i < ${#files[@]}; i += shards)); do shard+=("${files[i]}"); done
   [[ ${#shard[@]} -gt 0 ]] || continue
   python3 bench/harness.py "${shard[@]}" --samaya "${samaya}" --time-limit "${seconds}" \
-    --solu "${dir}/miplib2017.solu" --out "${out}/shard${k}.csv" > "${out}/shard${k}.log" 2>&1 &
+    --threads "${threads}" --solu "${dir}/miplib2017.solu" --out "${out}/shard${k}.csv" > "${out}/shard${k}.log" 2>&1 &
 done
 wait
 cat "${out}"/shard*.log | grep -E "Known solutions|WRONG|solved"
