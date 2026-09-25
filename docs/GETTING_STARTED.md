@@ -12,6 +12,9 @@ test-checked steps; **you** verify every step by running the commands yourself.
 
 ## Step 0: prerequisites (once)
 
+New to Git, WSL or GitHub? Do [ONBOARDING.md](ONBOARDING.md) first (repository access, WSL,
+tools, GitHub login, the branch and pull-request workflow), then continue here at Step 2.
+
 Linux or WSL2 (Ubuntu 22.04 or newer) with:
 
 ```sh

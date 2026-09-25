@@ -1,6 +1,7 @@
-# Getting started on samaya: a step-by-step guide
+# Onboarding: machine setup and Git workflow
 
-This guide takes you from a fresh laptop to your first merged pull request. No prior Git or
+This guide takes you from a fresh laptop to your first merged pull request. Once set up, follow
+[GETTING_STARTED.md](GETTING_STARTED.md) to work on a package with the Claude Code agent. No prior Git or
 Linux experience is assumed. Follow it in order and copy the commands exactly. Lines starting
 with `#` are comments; you don't type them.
 
