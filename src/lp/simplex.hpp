@@ -88,6 +88,9 @@ class Simplex {
   // Improving direction (length n + m) after kUnbounded.
   const std::vector<double>& primal_ray() const { return primal_ray_; }
   long long iterations() const { return iterations_; }
+  // Limits for the next solve (strong branching and tree search re-solve with small budgets).
+  void set_iteration_limit(long long limit);
+  void set_time_limit(double seconds) { options_.time_limit = seconds; }
   const SimplexStats& stats() const { return stats_; }
 
   // Dual steepest-edge weights as maintained by the updates, and recomputed from scratch as

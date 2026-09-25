@@ -5,6 +5,7 @@
 
 #include "core/log.hpp"
 #include "lp/lp_solver.hpp"
+#include "mip/branch_and_bound.hpp"
 #include "presolve/presolve.hpp"
 #include "samaya/verify.hpp"
 
@@ -179,6 +180,85 @@ void solve_lp_model(const Model& model, const Params& params, const Logger& log,
   result.unbounded_ray = std::move(lp.primal_ray);
 }
 
+// Presolves the MILP, runs branch-and-bound on the reduced model and maps the best solution
+// back. The returned solution is checked against the original model (bounds, rows and
+// integrality); the optimality of the bound rests on the search itself.
+void solve_mip_model(const Model& model, const Params& params, const Logger& log,
+                     Result& result) {
+  const Timer timer;
+  PresolveOptions presolve_options;
+  presolve_options.mip = true;
+  presolve_options.integrality_tol = params.integrality_tol;
+  Presolve presolve(model, presolve_options);
+  if (params.presolve) {
+    if (presolve.run() == PresolveStatus::kInfeasible) {
+      result.status = Status::kInfeasible;
+      result.message = "presolve proved infeasibility";
+      log.log(1, "Presolve: infeasible");
+      return;
+    }
+    const Model& reduced = presolve.reduced();
+    log.log(1, "Presolve: %d rows, %d cols (%d integer) -> %d rows, %d cols (%d integer)",
+            model.num_rows(), model.num_cols(), model.num_integers(), reduced.num_rows(),
+            reduced.num_cols(), reduced.num_integers());
+  }
+  const Model& work = params.presolve ? presolve.reduced() : model;
+
+  MipOutcome outcome;
+  if (work.num_cols() == 0) {
+    outcome.status = Status::kOptimal;
+    outcome.objective = outcome.bound = work.obj_offset;
+  } else {
+    MipOptions options;
+    options.time_limit = params.time_limit - timer.seconds();
+    options.node_limit = params.node_limit;
+    options.rel_gap = params.mip_rel_gap;
+    options.abs_gap = params.mip_abs_gap;
+    options.integrality_tol = params.integrality_tol;
+    BranchAndBound search(work, options, log);
+    outcome = search.solve();
+  }
+  result.status = outcome.status;
+  result.nodes = outcome.nodes;
+  result.simplex_iterations = outcome.lp_iterations;
+  result.dual_bound = outcome.bound;
+  log.log(1, "MIP: %lld nodes, %lld LP iterations (%lld in strong branching), %d heuristic "
+          "solutions", outcome.nodes, outcome.lp_iterations, outcome.strong_branching_iterations,
+          outcome.heuristic_solutions);
+
+  const bool has_solution = !outcome.x.empty() || (work.num_cols() == 0 &&
+                                                   outcome.status == Status::kOptimal);
+  if (!has_solution) return;
+  std::vector<double> x;
+  if (params.presolve) {
+    std::vector<double> unused_y;
+    presolve.postsolve(outcome.x, {}, x, unused_y);
+  } else {
+    x = std::move(outcome.x);
+  }
+  VerifyTolerances tol;
+  tol.integrality = params.integrality_tol;
+  const VerifyReport report = verify_primal(model, x, tol);
+  result.max_primal_violation = std::max(report.max_bound_violation, report.max_row_violation);
+  result.objective = report.objective;
+  result.col_value = std::move(x);
+  result.row_activity.assign(static_cast<std::size_t>(model.num_rows()), 0.0);
+  model.A.multiply(result.col_value, result.row_activity);
+  if (params.verify) {
+    result.verified = report.ok;
+    if (!report.ok) {
+      result.message = "solution failed verification: " + report.message;
+      result.status = Status::kNumericalError;
+    }
+  }
+  if (result.status == Status::kOptimal) {
+    // The bound cannot pass the solution's objective.
+    result.dual_bound = model.sense == ObjSense::kMinimize
+                            ? std::min(result.dual_bound, result.objective)
+                            : std::max(result.dual_bound, result.objective);
+  }
+}
+
 }  // namespace
 
 Result Solver::solve(const Model& model) const {
@@ -212,8 +292,10 @@ Result Solver::solve(const Model& model) const {
     case ProblemClass::kLP:
       solve_lp_model(model, params_, log, result);
       break;
-    case ProblemClass::kQP:
     case ProblemClass::kMILP:
+      solve_mip_model(model, params_, log, result);
+      break;
+    case ProblemClass::kQP:
     case ProblemClass::kMIQP:
       // Branch-and-cut and the QP solvers land in later phases (PLAN.md).
       result.status = Status::kNotImplemented;

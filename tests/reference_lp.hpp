@@ -4,6 +4,7 @@
 // with the production solver and is used only to cross-check it on small LPs.
 
 #include <cmath>
+#include <utility>
 #include <vector>
 
 #include "samaya/model.hpp"
@@ -13,6 +14,7 @@ namespace samaya::test {
 struct ReferenceResult {
   enum class Status { kOptimal, kInfeasible, kUnbounded } status = Status::kInfeasible;
   double objective = 0.0;
+  std::vector<double> x;  // An optimal point (optimal status only).
 };
 
 class ReferenceLp {
@@ -184,7 +186,7 @@ class ReferenceLp {
     for (int r = 0; r < rows; ++r) {
       if (basis_[r] >= first_art) infeasibility += tab_[r][cols];
     }
-    if (infeasibility > 1e-7L) return {ReferenceResult::Status::kInfeasible, 0.0};
+    if (infeasibility > 1e-7L) return {ReferenceResult::Status::kInfeasible, 0.0, {}};
 
     // Drive artificials out of the basis; drop rows that turn out redundant.
     for (int r = rows - 1; r >= 0; --r) {
@@ -204,12 +206,20 @@ class ReferenceLp {
     for (int k = first_art; k < cols; ++k) allowed[k] = false;
     std::vector<Real> phase2(static_cast<std::size_t>(cols), 0);
     for (int k = 0; k < nv; ++k) phase2[k] = cost_[k];
-    if (!optimize(phase2, allowed)) return {ReferenceResult::Status::kUnbounded, 0.0};
+    if (!optimize(phase2, allowed)) return {ReferenceResult::Status::kUnbounded, 0.0, {}};
 
     Real objective = constant_;
     for (std::size_t r = 0; r < tab_.size(); ++r) objective += phase2[basis_[r]] * tab_[r][cols];
     if (model_.sense == ObjSense::kMaximize) objective = -objective;
-    return {ReferenceResult::Status::kOptimal, static_cast<double>(objective)};
+    std::vector<Real> p(static_cast<std::size_t>(cols), 0);
+    for (std::size_t r = 0; r < tab_.size(); ++r) p[basis_[r]] = tab_[r][cols];
+    std::vector<double> x(subs_.size());
+    for (std::size_t j = 0; j < subs_.size(); ++j) {
+      Real v = subs_[j].shift;
+      for (const auto& [k, f] : subs_[j].terms) v += f * p[k];
+      x[j] = static_cast<double>(v);
+    }
+    return {ReferenceResult::Status::kOptimal, static_cast<double>(objective), std::move(x)};
   }
 
   const Model& model_;

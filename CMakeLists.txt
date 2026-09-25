@@ -62,6 +62,7 @@ add_library(samaya
   src/linalg/basis_factor.cpp
   src/lp/lp_solver.cpp
   src/lp/simplex.cpp
+  src/mip/branch_and_bound.cpp
   src/presolve/presolve.cpp
   src/linalg/scaling.cpp
   src/linalg/sparse_matrix.cpp
