@@ -65,6 +65,7 @@ add_library(samaya
   src/mip/branch_and_bound.cpp
   src/mip/cuts.cpp
   src/mip/heuristics.cpp
+  src/mip/probing.cpp
   src/presolve/presolve.cpp
   src/linalg/scaling.cpp
   src/linalg/sparse_matrix.cpp

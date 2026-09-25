@@ -13,6 +13,8 @@ namespace samaya {
 namespace {
 
 constexpr double kScoreFloor = 1e-6;
+// A solution replaces the incumbent only if it is better by this much (relative).
+constexpr double kMinImprovement = 1e-9;
 // Releasing the stored nodes when the search ends takes about 1 us per node (0.85 us measured on
 // gen-ip002 with 175k open nodes). The time limit reserves this, with a margin, so a search with
 // millions of open nodes still finishes within the limit.
@@ -21,6 +23,8 @@ constexpr double kReleaseSecondsPerNode = 2e-6;
 // nodes, with this iteration budget.
 constexpr long long kRoundAndSolveFrequency = 50;
 constexpr long long kRoundAndSolveIterations = 2000;
+// Primal and dual tolerance of the re-solve that repairs a rounded solution.
+constexpr double kTightPrimalTol = 1e-9;
 // Without an incumbent a plunge dives this deep; with one it continues while the child's bound
 // stays within this fraction of the gap above the best open bound.
 constexpr int kMaxPlungeDepth = 1000;
@@ -352,15 +356,22 @@ bool BranchAndBound::propagate(std::vector<Index> changed, std::vector<BoundChan
 // ---------------------------------------------------------------------------------------------
 // Solutions
 
+bool BranchAndBound::improves(double value) const {
+  if (incumbent_value_ == kInf) return value < kInf;
+  return value < incumbent_value_ - kMinImprovement * (1.0 + std::fabs(incumbent_value_));
+}
+
 bool BranchAndBound::try_solution(std::vector<double> x) {
   for (const Index j : integers_) {
     if (is_fractional(x[j])) return false;
     x[j] = std::round(x[j]);
   }
   const double tol = options_.feasibility_tol;
+  // The root bounds (after propagation and probing) hold for every feasible point, and the
+  // tightened rows are equivalent to the model's only inside them.
   for (Index j = 0; j < n_; ++j) {
-    if (x[j] < model_.col_lower[j] - tol * (1.0 + std::fabs(model_.col_lower[j])) ||
-        x[j] > model_.col_upper[j] + tol * (1.0 + std::fabs(model_.col_upper[j]))) {
+    if (x[j] < root_lower_[j] - tol * (1.0 + std::fabs(root_lower_[j])) ||
+        x[j] > root_upper_[j] + tol * (1.0 + std::fabs(root_upper_[j]))) {
       return false;
     }
   }
@@ -377,7 +388,7 @@ bool BranchAndBound::try_solution(std::vector<double> x) {
   }
   double value = offset_;
   for (Index j = 0; j < n_; ++j) value += cost_[j] * x[j];
-  if (value >= incumbent_value_ - 1e-9 * (1.0 + std::fabs(incumbent_value_))) return false;
+  if (!improves(value)) return false;
   incumbent_value_ = value;
   incumbent_ = std::move(x);
   log_.log(2, "mip: new incumbent %.12g after %lld nodes, %.2f s", sense_ * value,
@@ -416,7 +427,7 @@ void BranchAndBound::simple_rounding(const std::vector<double>& x) {
   if (try_solution(std::move(y))) ++outcome_.heuristic_solutions;
 }
 
-void BranchAndBound::round_and_solve(const std::vector<double>& x,
+bool BranchAndBound::round_and_solve(const std::vector<double>& x,
                                      const std::vector<VarStatus>& basis) {
   std::vector<std::pair<double, double>> saved;
   saved.reserve(integers_.size());
@@ -426,10 +437,29 @@ void BranchAndBound::round_and_solve(const std::vector<double>& x,
     set_bound(j, v, v);
   }
   const SimplexStatus status = solve_relaxation(&basis, kRoundAndSolveIterations);
-  if (status == SimplexStatus::kOptimal && try_solution(x_)) ++outcome_.heuristic_solutions;
+  bool found = status == SimplexStatus::kOptimal && try_solution(x_);
+  if (status == SimplexStatus::kOptimal && !found && relaxation_objective() < incumbent_value_) {
+    // The scaled tolerance (1e-7) can leave a row violated by more than the acceptance
+    // tolerance once unscaled; re-solve this LP from its optimal basis with tight tolerances.
+    SimplexOptions tight;
+    tight.primal_tol = kTightPrimalTol;
+    tight.dual_tol = kTightPrimalTol;
+    tight.perturb = false;
+    Simplex exact(lp_, tight, lp_log_);
+    exact.set_iteration_limit(kRoundAndSolveIterations);
+    exact.set_time_limit(std::max(0.0, remaining_time()));
+    if (exact.solve(simplex_->status()) == SimplexStatus::kOptimal) {
+      outcome_.lp_iterations += exact.iterations();
+      std::vector<double> y(static_cast<std::size_t>(n_));
+      for (Index j = 0; j < n_; ++j) y[j] = exact.values()[j] * scaling_.col[j];
+      found = try_solution(std::move(y));
+    }
+  }
+  if (found) ++outcome_.heuristic_solutions;
   for (std::size_t k = 0; k < integers_.size(); ++k) {
     set_bound(integers_[k], saved[k].first, saved[k].second);
   }
+  return found;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -794,11 +824,36 @@ BranchAndBound::NodeResult BranchAndBound::process_node(Node& node, std::vector<
     for (const Index j : integers_) {
       if (is_fractional(x[j])) fractional.push_back(j);
     }
-    if (fractional.empty()) {
-      try_solution(x);
-      return NodeResult::kPruned;
-    }
     auto basis = std::make_shared<const std::vector<VarStatus>>(current_basis());
+    if (fractional.empty()) {
+      if (try_solution(x)) return NodeResult::kPruned;
+      // No better than the incumbent: the node's LP bound rules out anything better.
+      if (!improves(objective)) return NodeResult::kPruned;
+      // Integral within the tolerance, yet rounding the integers broke a row (a large
+      // coefficient times a tiny rounding): re-solve the continuous columns with the integers
+      // fixed. If that fails, branch on the columns that are not exactly integral (x <= k or
+      // x >= k + 1 is a valid split at any value); only an exactly integral point that still
+      // fails leaves the node unresolved.
+      if (round_and_solve(x, *basis) || bound >= cutoff()) return NodeResult::kPruned;
+      for (const Index j : integers_) {
+        // Both children must be strictly smaller: a value just outside a bound (within the LP
+        // tolerance) gives no split.
+        if (x[j] != std::round(x[j]) && std::floor(x[j]) >= lower_[j] &&
+            std::ceil(x[j]) <= upper_[j]) {
+          fractional.push_back(j);
+        }
+      }
+      if (fractional.empty()) {
+        // The LP point is its integer rounding up to the LP tolerances. If that rounding does
+        // not beat the incumbent, the difference is round-off and nothing better is left here.
+        double rounded = offset_;
+        for (Index k = 0; k < n_; ++k) {
+          const bool integer = model_.col_type[k] == VarType::kInteger;
+          rounded += cost_[k] * (integer ? std::round(x[k]) : x[k]);
+        }
+        return improves(rounded) ? NodeResult::kFailed : NodeResult::kPruned;
+      }
+    }
     if (node.depth == 0 && round == 0) {
       root_basis_ = *basis;
       log_.log(1, "MIP root relaxation %.12g, %zu fractional of %zu integers, %lld iterations",
@@ -872,8 +927,35 @@ MipOutcome BranchAndBound::solve() {
     outcome_.status = Status::kInfeasible;
     return outcome_;
   }
+  if (options_.probing && !integers_.empty()) {
+    outcome_.coefficients_tightened = tighten_coefficients();
+    if (outcome_.coefficients_tightened > 0) {
+      log_.log(1, "MIP: %d coefficients tightened", outcome_.coefficients_tightened);
+    }
+    if (!probe()) {
+      outcome_.status = Status::kInfeasible;
+      return outcome_;
+    }
+  }
   root_lower_ = lower_;
   root_upper_ = upper_;
+  if (!options_.debug_solution.empty()) {
+    const std::vector<double>& d = options_.debug_solution;
+    const double tol = options_.feasibility_tol;
+    for (Index j = 0; j < n_; ++j) {
+      if (d[j] < root_lower_[j] - tol || d[j] > root_upper_[j] + tol) {
+        ++outcome_.debug_reduction_violations;
+      }
+    }
+    std::vector<double> activity(static_cast<std::size_t>(m_), 0.0);
+    model_.A.multiply(d, activity);
+    for (Index i = 0; i < m_; ++i) {
+      if (activity[i] < model_.row_lower[i] - tol * (1.0 + std::fabs(model_.row_lower[i])) ||
+          activity[i] > model_.row_upper[i] + tol * (1.0 + std::fabs(model_.row_upper[i]))) {
+        ++outcome_.debug_reduction_violations;
+      }
+    }
+  }
   for (const Index j : touched_) is_touched_[j] = 0;
   touched_.clear();
   root_cut_loop();

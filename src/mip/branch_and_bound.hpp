@@ -38,6 +38,8 @@ struct MipOptions {
   // Primal heuristics: feasibility pump, diving, and the RENS/RINS sub-MIPs (solved by a nested
   // search on a presolved copy; a nested search never starts sub-MIPs itself).
   bool heuristics = true;
+  // Root reductions for integer columns: coefficient tightening and probing on binaries.
+  bool probing = true;
   bool sub_mip_heuristics = true;
   // Only solutions strictly better than this objective (in the model's sense) are accepted; the
   // search prunes against it as if it were an incumbent. Used by the sub-MIPs.
@@ -58,12 +60,17 @@ struct MipOutcome {
   long long lp_iterations = 0;
   long long strong_branching_iterations = 0;
   int heuristic_solutions = 0;
+  int coefficients_tightened = 0;
+  int probing_fixed = 0;
+  int probing_tightened = 0;
   long long heuristic_lp_iterations = 0;  // Diving and feasibility-pump LPs (part of lp_iterations).
   int cut_rounds = 0;
   int cuts_added = 0;             // Cuts in the LP after the root (non-binding ones removed).
   double root_bound = -kInf;      // Root LP bound before and after cuts, in the model's sense.
   double root_bound_cuts = -kInf;
   long long debug_cut_violations = 0;
+  // Root bounds or tightened rows that exclude debug_solution (must stay 0).
+  long long debug_reduction_violations = 0;
 };
 
 // LP-based branch-and-bound for mixed-integer linear programs.
@@ -117,6 +124,10 @@ class BranchAndBound {
   double relaxation_objective() const;
   std::vector<VarStatus> current_basis() const;
 
+  // Root reductions (probing.cpp).
+  int tighten_coefficients();
+  bool probe();
+
   // Heuristics (heuristics.cpp).
   enum class DiveRule : std::uint8_t { kFractional, kCoefficient, kPseudocost, kGuided };
   void run_heuristics(const Node& node, const std::vector<double>& x,
@@ -152,9 +163,12 @@ class BranchAndBound {
 
   // Solutions.
   bool is_fractional(double v) const;
+  bool improves(double value) const;  // Better than the incumbent (minimization).
   bool try_solution(std::vector<double> x);
   void simple_rounding(const std::vector<double>& x);
-  void round_and_solve(const std::vector<double>& x, const std::vector<VarStatus>& basis);
+  // Fixes the integers at their rounded values and re-solves the continuous columns; true if
+  // that gave a new incumbent.
+  bool round_and_solve(const std::vector<double>& x, const std::vector<VarStatus>& basis);
 
   Model model_;  // Own copy: cuts are appended as rows.
   MipOptions options_;

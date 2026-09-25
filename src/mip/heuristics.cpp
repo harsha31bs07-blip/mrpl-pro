@@ -145,7 +145,11 @@ void BranchAndBound::dive(DiveRule rule, const std::vector<double>& x0,
       }
     }
     if (best < 0) {
-      if (try_solution(x)) ++outcome_.heuristic_solutions;
+      if (try_solution(x)) {
+        ++outcome_.heuristic_solutions;
+      } else {
+        round_and_solve(x, basis);  // Integral within the tolerance but not exactly.
+      }
       break;
     }
     if (all_roundable) {

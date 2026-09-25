@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <random>
+#include <string>
 #include <vector>
 
 #include "core/log.hpp"
@@ -305,6 +306,66 @@ TEST(mip_cuts_never_separate_an_optimal_solution) {
   CHECK(tightened > 100);
 }
 
+TEST(mip_root_reductions_keep_an_optimal_solution) {
+  // Coefficient tightening and probing change the root bounds and rows; a known optimal
+  // solution must stay feasible for them, and the search must still find the optimum.
+  const samaya::Logger quiet(0);
+  long long violations = 0;
+  long long reductions = 0;
+  int models = 0;
+  for (const MilpFamily family :
+       {MilpFamily::kMixed, MilpFamily::kPureInteger, MilpFamily::kKnapsack}) {
+    std::mt19937 rng(200 + static_cast<unsigned>(family));
+    for (int k = 0; k < 200; ++k) {
+      Model model = random_milp(family, rng);
+      // Binaries make the reductions apply more often.
+      if (k % 2 == 0) {
+        for (Index j = 0; j < model.num_cols(); ++j) {
+          if (model.col_type[j] == samaya::VarType::kInteger) {
+            model.col_lower[j] = 0;
+            model.col_upper[j] = 1;
+          }
+        }
+      }
+      const ReferenceMilpResult ref = samaya::test::reference_milp(model);
+      if (ref.status != ReferenceMilpResult::Status::kOptimal) continue;
+      samaya::MipOptions options;
+      options.rel_gap = 0.0;
+      options.abs_gap = 1e-9;
+      options.cuts = false;
+      options.debug_solution = ref.x;
+      const samaya::MipOutcome out = samaya::BranchAndBound(model, options, quiet).solve();
+      ++models;
+      violations += out.debug_reduction_violations;
+      reductions += out.coefficients_tightened + out.probing_fixed + out.probing_tightened;
+      CHECK(out.status == Status::kOptimal);
+      CHECK(std::fabs(out.objective - ref.objective) <= 1e-6 * (1 + std::fabs(ref.objective)));
+    }
+  }
+  // 5 x1 + x2 + x3 <= 6 over binaries is x1 + x2 + x3 <= 2 on integer points.
+  Model knap;
+  knap.sense = samaya::ObjSense::kMaximize;
+  knap.obj = {5, 3, 3};  // LP bound 10 on the original row (x2 = x3 = 1, x1 = 0.8), 8 after.
+  knap.col_lower = {0, 0, 0};
+  knap.col_upper = {1, 1, 1};
+  knap.col_type.assign(3, samaya::VarType::kInteger);
+  knap.row_lower = {-kInf};
+  knap.row_upper = {6};
+  knap.A = samaya::SparseMatrix::from_triplets(1, 3, {{0, 0, 5}, {0, 1, 1}, {0, 2, 1}});
+  samaya::MipOptions options;
+  options.debug_solution = {1, 1, 0};
+  const samaya::MipOutcome out = samaya::BranchAndBound(knap, options, quiet).solve();
+  CHECK(out.coefficients_tightened >= 1);
+  CHECK_EQ(out.debug_reduction_violations, 0);
+  CHECK_NEAR(out.objective, 8.0, 1e-9);
+  CHECK_NEAR(out.root_bound, 8.0, 1e-9);  // The tightened row makes the LP integral.
+
+  std::printf("  %d models, %lld reductions, %lld violations\n", models, reductions, violations);
+  CHECK_EQ(violations, 0);
+  CHECK(models > 400);
+  CHECK(reductions > 50);
+}
+
 TEST(mip_random_models_match_reference_without_cuts) {
   std::mt19937 rng(21);
   samaya::Params params;
@@ -429,6 +490,21 @@ TEST(mip_time_limit_is_respected) {
     CHECK(result.verified);
     CHECK(result.dual_bound <= result.objective + 1e-9);
   }
+}
+
+TEST(mip_nearly_integral_lp_solution_is_repaired_not_pruned) {
+  // Regression (cases/mrpl.py crude, small): the root LP after cuts is integral within the
+  // tolerance, but rounding a cargo binary (coefficient 130 in a tank balance) breaks the row by
+  // more than the row tolerance. The node must be repaired by re-solving the continuous columns,
+  // not pruned as infeasible. HiGHS: optimal 708749.0576.
+  const Model model =
+      samaya::read_mps(std::string(SAMAYA_TEST_DATA_DIR) + "/mrpl_crude_small.mps");
+  samaya::Params params;
+  params.log_level = 0;
+  const samaya::Result result = samaya::Solver(params).solve(model);
+  CHECK(result.status == Status::kOptimal);
+  CHECK(result.verified);
+  CHECK(std::fabs(result.objective - 708749.0576) <= 1e-4 * 708749.0576);
 }
 
 TEST(mip_infeasible_and_unbounded_models) {
