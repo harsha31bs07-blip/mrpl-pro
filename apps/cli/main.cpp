@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <string_view>
@@ -29,6 +30,7 @@ void print_usage(std::FILE* out) {
                "Options:\n"
                "  --stats               Print model statistics and exit without solving\n"
                "  --json                Print a JSON run summary as the last line of output\n"
+               "  --solution <file>     Write status, objective, primal and dual values to a file\n"
                "  --time-limit <sec>    Wall-clock time limit\n"
                "  --threads <n>         Worker threads (0 = all cores)\n"
                "  --mip-gap <gap>       Relative MIP gap tolerance\n"
@@ -80,6 +82,51 @@ std::string json_number(double v) {
   return buf;
 }
 
+// Plain-text solution file: a header, then one line per column and per row.
+bool write_solution(const std::string& file, const samaya::Model& model,
+                    const samaya::Result& result) {
+  std::ofstream out(file);
+  if (!out) return false;
+  out.precision(17);
+  out << "status " << samaya::to_string(result.status) << "\n";
+  out << "verified " << (result.verified ? "yes" : "no") << "\n";
+  if (std::isfinite(result.objective)) out << "objective " << result.objective << "\n";
+  const bool has_duals = !result.row_dual.empty();
+  if (!result.col_value.empty()) {
+    out << "\ncolumns " << model.num_cols() << "\n# name value" << (has_duals ? " reduced_cost" : "")
+        << "\n";
+    for (samaya::Index j = 0; j < model.num_cols(); ++j) {
+      out << (model.col_names.empty() ? "c" + std::to_string(j) : model.col_names[j]) << " "
+          << result.col_value[j];
+      if (has_duals) out << " " << result.col_dual[j];
+      out << "\n";
+    }
+    out << "\nrows " << model.num_rows() << "\n# name activity" << (has_duals ? " dual" : "")
+        << "\n";
+    for (samaya::Index i = 0; i < model.num_rows(); ++i) {
+      out << (model.row_names.empty() ? "r" + std::to_string(i) : model.row_names[i]) << " "
+          << result.row_activity[i];
+      if (has_duals) out << " " << result.row_dual[i];
+      out << "\n";
+    }
+  }
+  if (!result.infeasibility_certificate.empty()) {
+    out << "\ninfeasibility_certificate " << model.num_rows() << "\n";
+    for (samaya::Index i = 0; i < model.num_rows(); ++i) {
+      out << (model.row_names.empty() ? "r" + std::to_string(i) : model.row_names[i]) << " "
+          << result.infeasibility_certificate[i] << "\n";
+    }
+  }
+  if (!result.unbounded_ray.empty()) {
+    out << "\nunbounded_ray " << model.num_cols() << "\n";
+    for (samaya::Index j = 0; j < model.num_cols(); ++j) {
+      out << (model.col_names.empty() ? "c" + std::to_string(j) : model.col_names[j]) << " "
+          << result.unbounded_ray[j] << "\n";
+    }
+  }
+  return static_cast<bool>(out);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -87,6 +134,7 @@ int main(int argc, char** argv) {
   bool stats_only = false;
   bool json = false;
   std::string path;
+  std::string solution_path;
 
   for (int i = 1; i < argc; ++i) {
     const std::string_view arg = argv[i];
@@ -118,6 +166,8 @@ int main(int argc, char** argv) {
       stats_only = true;
     } else if (arg == "--json") {
       json = true;
+    } else if (arg == "--solution") {
+      solution_path = next_value("--solution");
     } else if (arg == "--time-limit") {
       params.time_limit = next_number("--time-limit");
     } else if (arg == "--threads") {
@@ -177,15 +227,23 @@ int main(int argc, char** argv) {
   samaya::Result result;
   if (!stats_only) result = samaya::Solver(params).solve(model);
 
+  if (!solution_path.empty() && !stats_only && !write_solution(solution_path, model, result)) {
+    std::fprintf(stderr, "samaya: cannot write solution to '%s'\n", solution_path.c_str());
+  }
+
   if (json) {
     std::printf(
         "{\"instance\":%s,\"name\":%s,\"class\":\"%s\",\"rows\":%d,\"cols\":%d,\"nnz\":%lld,"
-        "\"integers\":%d,\"status\":\"%s\",\"objective\":%s,\"dual_bound\":%s,"
-        "\"read_seconds\":%s,\"solve_seconds\":%s,\"nodes\":%lld,\"message\":%s}\n",
+        "\"integers\":%d,\"status\":\"%s\",\"verified\":%s,\"objective\":%s,"
+        "\"dual_bound\":%s,\"max_primal_violation\":%s,\"max_dual_violation\":%s,"
+        "\"simplex_iterations\":%lld,\"read_seconds\":%s,\"solve_seconds\":%s,\"nodes\":%lld,"
+        "\"message\":%s}\n",
         json_string(path).c_str(), json_string(model.name).c_str(),
         samaya::to_string(model.problem_class()), stats.rows, stats.cols,
         static_cast<long long>(stats.nnz), stats.integers, samaya::to_string(result.status),
-        json_number(result.objective).c_str(), json_number(result.dual_bound).c_str(),
+        result.verified ? "true" : "false", json_number(result.objective).c_str(),
+        json_number(result.dual_bound).c_str(), json_number(result.max_primal_violation).c_str(),
+        json_number(result.max_dual_violation).c_str(), result.simplex_iterations,
         json_number(read_seconds).c_str(), json_number(result.solve_seconds).c_str(),
         result.nodes, json_string(result.message).c_str());
   }

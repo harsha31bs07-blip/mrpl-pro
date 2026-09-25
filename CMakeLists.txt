@@ -59,7 +59,12 @@ add_library(samaya
   src/core/status.cpp
   src/core/c_api.cpp
   src/io/mps_reader.cpp
+  src/linalg/basis_factor.cpp
+  src/lp/lp_solver.cpp
+  src/lp/simplex.cpp
+  src/linalg/scaling.cpp
   src/linalg/sparse_matrix.cpp
+  src/verify/verify.cpp
 )
 add_library(samaya::samaya ALIAS samaya)
 target_include_directories(samaya

@@ -36,6 +36,13 @@ std::string check_bounds(const char* what, const std::vector<double>& lower,
     if (lower[i] == kInf || upper[i] == -kInf) {
       return std::string(what) + " " + std::to_string(i) + " has an infinite bound on the wrong side";
     }
+  }
+  return {};
+}
+
+std::string first_crossed(const char* what, const std::vector<double>& lower,
+                          const std::vector<double>& upper) {
+  for (std::size_t i = 0; i < lower.size(); ++i) {
     if (lower[i] > upper[i]) {
       return std::string(what) + " " + std::to_string(i) + " has lower bound > upper bound";
     }
@@ -79,6 +86,11 @@ std::string Model::validate() const {
   if (std::string e = check_bounds("column", col_lower, col_upper); !e.empty()) return e;
   if (std::string e = check_bounds("row", row_lower, row_upper); !e.empty()) return e;
   return {};
+}
+
+std::string Model::crossed_bounds() const {
+  if (std::string e = first_crossed("column", col_lower, col_upper); !e.empty()) return e;
+  return first_crossed("row", row_lower, row_upper);
 }
 
 }  // namespace samaya

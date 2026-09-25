@@ -52,8 +52,12 @@ struct Model {
   ProblemClass problem_class() const;
 
   // Returns an empty string when the model is consistent, otherwise a description of the first
-  // problem found (mismatched sizes, NaNs, crossed bounds, ...).
+  // problem found (mismatched sizes, NaNs, infinite bounds on the wrong side, ...). Crossed
+  // bounds (lower > upper) are valid input: they make the model infeasible.
   std::string validate() const;
+
+  // Describes the first column or row whose lower bound exceeds its upper bound, if any.
+  std::string crossed_bounds() const;
 };
 
 }  // namespace samaya
