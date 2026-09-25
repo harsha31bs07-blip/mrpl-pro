@@ -233,14 +233,16 @@ hybrid gradient", NeurIPS 2021; the cuPDLP papers of Lu and Yang, 2023):
    verifier then checks).
 5. Optional feasibility polishing.
 
-**Milestones:**
+**Milestones** (step-by-step prompts in [GETTING_STARTED.md](GETTING_STARTED.md)):
 - **M1:** plain PDHG solves tiny LPs.
 - **M2:** restarts, adaptive steps and primal weight added; matches the reference simplex to
   1e-6 relative on the random LP families.
-- **M3:** Netlib with `tol = 1e-4` and `1e-8`, reporting iterations and time per instance.
-- **M4:** `--lp-method pdlp` wired into `solve_lp_model`, results verified; PDLP output is
-  lower accuracy, so either lower the verifier tolerance for PDLP explicitly (logged, stated in
-  `Result.message`) or polish with a simplex crossover from the PDLP point (see WP3 M5).
+- **M3:** infeasibility and unboundedness detection, with rays that pass the verifier.
+- **M4:** `--lp-method pdlp` wired into `solve_lp_model`, results verified. PDLP output is lower
+  accuracy, so a PDLP point that fails the strict verifier is polished by the simplex from a
+  basis guessed from it (see WP3 M5 for the full crossover); the verifier is never loosened
+  silently.
+- **M5:** Netlib at `tol = 1e-4` and `1e-8`, reporting iterations and time per instance.
 
 **Done when:** the random families pass, Netlib runs at `tol = 1e-4` with a solved-count report,
 the verifier is wired in, and all presets are green.
