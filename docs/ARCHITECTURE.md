@@ -23,8 +23,8 @@ If you take a work package, read sections 1–5, then your package in section 6.
 | MILP branch-and-bound, propagation, reliability branching, heuristics | done | 1,900 random MILPs versus a reference MILP solver |
 | Root cuts: Gomory mixed-integer, c-MIR, knapsack covers | done | cuts checked against known optima |
 | **Netlib LP** | **93/93 optimal, all objectives match HiGHS**; 28/29 infeasible set proven | [docs/results/netlib.md](results/netlib.md) |
-| Generated MILPs (refinery scheduling, knapsack, facility location) | 7/7 match HiGHS | `bench/results/` |
-| MIPLIB 2017, 62 small "easy" instances, 10 min each | 7/62 without cuts, 0 wrong answers; rerun with cuts in progress | `bench/miplib_small.test` |
+| Generated MILPs (refinery scheduling, knapsack, facility location) | 7/7 match HiGHS | [docs/results/generated-mip.md](results/generated-mip.md) |
+| MIPLIB 2017, 62 small "easy" instances, 10 min each | 8/62 with root cuts (7 without), 0 wrong answers | [docs/results/miplib.md](results/miplib.md) |
 | **Barrier (interior point), PDLP, GPU, QP** | **not started** | these are the work packages below |
 
 The core is dependency-free C++20. **No external solver or linear-algebra library is linked**
