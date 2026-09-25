@@ -1,0 +1,14 @@
+instance,solver,status,objective,solve_seconds,wall_seconds,nodes,class,verified
+50v-10,samaya,time_limit,3598.42999704182,59.97122199,59.9756,20819,MILP,True
+ic97_potential,samaya,time_limit,,59.939890527,59.944,61669,MILP,False
+neos-911970,samaya,time_limit,60.549999854385696,59.780651793,59.7878,341062,MILP,True
+markshare_4_0,samaya,optimal,1.0000000000000142,13.850369659,13.8545,1287370,MILP,True
+neos5,samaya,time_limit,15,59.798270708,59.8352,156400,MILP,True
+neos-5107597-kakapo,samaya,time_limit,,60.003106001,60.0094,311,MILP,False
+neos-2657525-crna,samaya,time_limit,30.6960116,59.920562386,59.9275,87275,MILP,True
+app1-1,samaya,optimal,-3,16.607946992,16.6186,31,MILP,True
+glass4,samaya,time_limit,2516690632.8333297,59.876159468,59.8844,179191,MILP,True
+fhnw-binpack4-4,samaya,time_limit,,59.934985658,59.9416,101029,MILP,False
+gmu-35-40,samaya,time_limit,-2399308.0864,59.862253214,59.871,132979,MILP,True
+timtab1,samaya,time_limit,,59.920970959,59.9349,111601,MILP,False
+binkar10_1,samaya,time_limit,6747.31001455705,59.9467795,59.9525,41263,MILP,True
