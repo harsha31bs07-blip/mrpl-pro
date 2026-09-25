@@ -51,8 +51,9 @@ judges. Code freezes at **T+36 h**; the last 12 hours are final benchmarks, docs
 | 36–40 | Final 10-min run, samaya and HiGHS, same machine | laptop |
 | 40–48 | Results docs, merge the teammate's PDLP/GPU work, demo rehearsal, buffer | – |
 
-**Dropped for the deadline:** A5 (conflict analysis), A6 (parallel tree search), cuts in the
-tree, zero-half cuts, root restarts, barrier and QP. If a step runs over, the next one is cut,
+**Dropped for the deadline:** A5 (conflict analysis), cuts in the tree, zero-half cuts, root
+restarts, barrier and QP. (A6, the parallel search, was dropped at first and then done because
+the other steps finished early.) If a step runs over, the next one is cut,
 never the tests or the verifier.
 
 **Targets for 48 hours (single thread):**
@@ -62,6 +63,31 @@ never the tests or the verifier.
 - no wrong answers.
 
 The longer-term targets below still stand for after the deadline.
+
+## Progress (updated as work lands)
+
+60 s screening of the 62 instances, single-threaded, four at a time on the 4-core cloud machine.
+"Median gap" counts an instance without a solution as 100%; that is stricter than the 2.8%
+above, which ignores such instances.
+
+| Build | Feasible | Median gap | Solved | Wrong |
+|---|---|---|---|---|
+| `main` (tuned cuts) | 37 | 46.9% | 3 | 0 |
+| + A1 time limit, A3 heuristics | 43 | 12.8% | 3 | 0 |
+| + A2 probing, coefficient tightening, nearly-integral node fix | 45 | 11.4% | 3 | 0 |
+| + parallel search (run with 1 thread), pseudocost fix, dive backoff | 46 | 11.6% | 3 | 0 |
+
+**Done:**
+- **A1:** runs end within the time limit (the node release time is reserved).
+- **A3:** feasibility pump, four diving rules, RENS and RINS.
+- **A2 lite:** probing on binaries, coefficient tightening.
+- **Track B:** `cases/` (three MRPL families, the demo, 9/9 agree with HiGHS).
+- **A6:** parallel tree search, `--threads N`.
+- **A correctness fix:** a node whose LP point was integral only within the tolerance could be
+  pruned (found by the MRPL crude case).
+
+**Tried and dropped:** variable-upper-bound substitution in c-MIR (A4); no MIPLIB root bound
+moved.
 
 ## Rules for every milestone
 
