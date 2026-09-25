@@ -1,0 +1,14 @@
+instance,solver,status,objective,solve_seconds,wall_seconds,nodes,class,verified
+reblock115,samaya,time_limit,,60.017715879,60.0245,50,MILP,False
+pk1,samaya,optimal,11,38.948496257,38.9514,330334,MILP,True
+p200x1188c,samaya,time_limit,15078,59.971416299,59.9772,25340,MILP,True
+qap10,samaya,time_limit,378,60.001783388,60.0073,1,MILP,True
+enlight_hard,samaya,time_limit,37,59.93449838,59.9393,186755,MILP,True
+neos-4954672-berkel,samaya,time_limit,3206318.999997,59.982711416,59.9877,13562,MILP,True
+neos-3381206-awhea,samaya,time_limit,,59.848374382,59.8573,97880,MILP,False
+beasleyC3,samaya,time_limit,946,60.000651948,60.0039,1053,MILP,True
+gmu-35-50,samaya,time_limit,-2604690.1717,59.893334142,59.9016,118564,MILP,True
+fhnw-binpack4-48,samaya,time_limit,,60.002185603,60.0086,344,MILP,False
+rococoC10-001000,samaya,time_limit,,60.002439226,60.009,1,MILP,False
+pg,samaya,time_limit,-8674.342627002337,59.99853661,60.0024,2426,MILP,True
+pg5_34,samaya,time_limit,-14316.173946708153,59.994628625,59.9994,4110,MILP,True
