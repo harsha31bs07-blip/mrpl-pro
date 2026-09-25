@@ -3,6 +3,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <algorithm>
 #include <cstdio>
 #include <random>
 #include <vector>
@@ -12,6 +13,7 @@
 #include "reference_milp.hpp"
 #include "samaya/io.hpp"
 #include "samaya/solver.hpp"
+#include "samaya/verify.hpp"
 #include "test_framework.hpp"
 
 using samaya::Index;
@@ -149,7 +151,107 @@ MilpTally cross_check(MilpFamily family, int count, unsigned seed, bool presolve
   return tally;
 }
 
+// Set partitioning with a planted partition: every row is covered exactly once. Rounding the LP
+// point rarely gives a partition, so these need the pump, diving or a sub-MIP.
+Model set_partitioning(std::mt19937& rng) {
+  const auto uniform_int = [&](int lo, int hi) {
+    return std::uniform_int_distribution<int>(lo, hi)(rng);
+  };
+  const int m = uniform_int(15, 30);
+  std::vector<std::vector<int>> columns;
+  // The planted partition: consecutive blocks of 1-3 rows.
+  for (int i = 0; i < m;) {
+    const int size = std::min(m - i, uniform_int(1, 3));
+    std::vector<int> col;
+    for (int k = 0; k < size; ++k) col.push_back(i + k);
+    columns.push_back(col);
+    i += size;
+  }
+  const int extra = uniform_int(2 * m, 4 * m);
+  for (int k = 0; k < extra; ++k) {
+    std::vector<int> col;
+    const int size = uniform_int(2, 4);
+    while (static_cast<int>(col.size()) < size) {
+      const int r = uniform_int(0, m - 1);
+      if (std::find(col.begin(), col.end(), r) == col.end()) col.push_back(r);
+    }
+    columns.push_back(col);
+  }
+  std::shuffle(columns.begin(), columns.end(), rng);
+  Model model;
+  std::vector<samaya::Triplet> t;
+  for (std::size_t j = 0; j < columns.size(); ++j) {
+    // Costs slightly below the size favour the random (non-planted) columns in the LP.
+    model.obj.push_back(static_cast<double>(columns[j].size()) *
+                        (0.8 + 0.4 * (uniform_int(0, 99) / 100.0)));
+    model.col_lower.push_back(0);
+    model.col_upper.push_back(1);
+    model.col_type.push_back(samaya::VarType::kInteger);
+    for (const int r : columns[j]) t.push_back({r, static_cast<Index>(j), 1.0});
+  }
+  model.row_lower.assign(static_cast<std::size_t>(m), 1.0);
+  model.row_upper.assign(static_cast<std::size_t>(m), 1.0);
+  model.A = samaya::SparseMatrix::from_triplets(m, static_cast<Index>(columns.size()),
+                                                std::move(t));
+  return model;
+}
+
 }  // namespace
+
+TEST(mip_heuristics_find_solutions_at_the_root) {
+  // The root alone (one node, no cuts): simple rounding and round-and-solve against the pump,
+  // diving and RENS. Every solution must pass the verifier on the model.
+  const samaya::Logger quiet(0);
+  int found[2] = {0, 0};
+  int models = 0;
+  std::mt19937 rng(31);
+  for (int k = 0; k < 40; ++k) {
+    const Model model = set_partitioning(rng);
+    ++models;
+    for (int h = 0; h < 2; ++h) {
+      samaya::MipOptions options;
+      options.cuts = false;
+      options.node_limit = 1;
+      options.heuristics = h == 1;
+      const samaya::MipOutcome out = samaya::BranchAndBound(model, options, quiet).solve();
+      if (out.x.empty()) continue;
+      ++found[h];
+      const samaya::VerifyReport report = samaya::verify_primal(model, out.x, {});
+      CHECK(report.ok);
+      CHECK(out.bound <= out.objective + 1e-9);
+    }
+  }
+  std::printf("  %d set-partitioning models: solution at the root %d without heuristics, %d "
+              "with\n", models, found[0], found[1]);
+  CHECK(found[1] >= 36);
+  CHECK(found[1] > found[0]);
+}
+
+TEST(mip_objective_cutoff_accepts_only_better_solutions) {
+  const samaya::Logger quiet(0);
+  std::mt19937 rng(41);
+  int checked = 0;
+  for (int k = 0; k < 120; ++k) {
+    const Model model = random_milp(k % 2 ? MilpFamily::kMixed : MilpFamily::kKnapsack, rng);
+    const ReferenceMilpResult ref = samaya::test::reference_milp(model);
+    if (ref.status != ReferenceMilpResult::Status::kOptimal) continue;
+    ++checked;
+    const double worse = model.sense == samaya::ObjSense::kMaximize ? -1.0 : 1.0;
+    samaya::MipOptions options;
+    options.rel_gap = 0.0;
+    options.abs_gap = 1e-9;
+    // Nothing is better than the optimum (the margin covers round-off between the reference's
+    // objective and ours).
+    options.objective_cutoff = ref.objective - worse * 1e-6 * (1.0 + std::fabs(ref.objective));
+    CHECK(samaya::BranchAndBound(model, options, quiet).solve().x.empty());
+    // A looser cutoff still finds the optimum.
+    options.objective_cutoff = ref.objective + worse * (1.0 + std::fabs(ref.objective));
+    const samaya::MipOutcome out = samaya::BranchAndBound(model, options, quiet).solve();
+    CHECK(out.status == Status::kOptimal);
+    CHECK(std::fabs(out.objective - ref.objective) <= 1e-6 * (1.0 + std::fabs(ref.objective)));
+  }
+  CHECK(checked > 60);
+}
 
 TEST(mip_random_models_match_reference) {
   for (const bool presolve : {true, false}) {

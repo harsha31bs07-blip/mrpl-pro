@@ -2,6 +2,8 @@
 
 #include <map>
 #include <memory>
+#include <optional>
+#include <random>
 #include <vector>
 
 #include "core/log.hpp"
@@ -33,6 +35,13 @@ struct MipOptions {
   bool cuts = true;
   int max_cut_rounds = 20;
   int max_cuts_per_round = 200;
+  // Primal heuristics: feasibility pump, diving, and the RENS/RINS sub-MIPs (solved by a nested
+  // search on a presolved copy; a nested search never starts sub-MIPs itself).
+  bool heuristics = true;
+  bool sub_mip_heuristics = true;
+  // Only solutions strictly better than this objective (in the model's sense) are accepted; the
+  // search prunes against it as if it were an incumbent. Used by the sub-MIPs.
+  std::optional<double> objective_cutoff;
   // Tests: a known feasible (e.g. optimal) solution. Every cut is checked against it and a cut
   // that separates it is counted in MipOutcome::debug_cut_violations.
   std::vector<double> debug_solution;
@@ -49,6 +58,7 @@ struct MipOutcome {
   long long lp_iterations = 0;
   long long strong_branching_iterations = 0;
   int heuristic_solutions = 0;
+  long long heuristic_lp_iterations = 0;  // Diving and feasibility-pump LPs (part of lp_iterations).
   int cut_rounds = 0;
   int cuts_added = 0;             // Cuts in the LP after the root (non-binding ones removed).
   double root_bound = -kInf;      // Root LP bound before and after cuts, in the model's sense.
@@ -106,6 +116,20 @@ class BranchAndBound {
   SimplexStatus solve_relaxation(const std::vector<VarStatus>* start, long long iteration_limit);
   double relaxation_objective() const;
   std::vector<VarStatus> current_basis() const;
+
+  // Heuristics (heuristics.cpp).
+  enum class DiveRule : std::uint8_t { kFractional, kCoefficient, kPseudocost, kGuided };
+  void run_heuristics(const Node& node, const std::vector<double>& x,
+                      const std::vector<VarStatus>& basis);
+  void dive(DiveRule rule, const std::vector<double>& x, const std::vector<VarStatus>& basis,
+            long long budget);
+  void feasibility_pump(const std::vector<double>& x, const std::vector<VarStatus>& basis,
+                        long long budget);
+  void rens(const std::vector<double>& x);
+  void rins(const std::vector<double>& x);
+  void sub_mip(const std::vector<double>& lower, const std::vector<double>& upper,
+               const char* name);
+  void undo_bounds(std::size_t mark);
 
   // Cuts.
   void root_cut_loop();
@@ -178,6 +202,15 @@ class BranchAndBound {
   MipOutcome outcome_;
   bool incomplete_ = false;
   bool open_limit_logged_ = false;
+
+  // Heuristic state. While logging_undo_ is set, set_bound records the previous bounds so a dive
+  // can backtrack and restore the node.
+  std::vector<BoundChange> undo_log_;
+  bool logging_undo_ = false;
+  int next_dive_rule_ = 0;
+  long long next_rins_node_ = 0;
+  double rins_incumbent_ = kInf;
+  std::mt19937 rng_{12345};
 };
 
 }  // namespace samaya

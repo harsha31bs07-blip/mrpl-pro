@@ -138,6 +138,7 @@ BranchAndBound::~BranchAndBound() = default;
 // Relaxation
 
 void BranchAndBound::set_bound(Index j, double lower, double upper) {
+  if (logging_undo_) undo_log_.push_back({j, lower_[j], upper_[j]});
   lower_[j] = lower;
   upper_[j] = upper;
   lp_.lower[j] = lower / scaling_.col[j];
@@ -808,6 +809,7 @@ BranchAndBound::NodeResult BranchAndBound::process_node(Node& node, std::vector<
     if (node.depth == 0 || outcome_.nodes % kRoundAndSolveFrequency == 0) {
       round_and_solve(x, *basis);
     }
+    if (options_.heuristics && round == 0) run_heuristics(node, x, *basis);
     if (bound >= cutoff()) {
       pruned_bound_ = std::min(pruned_bound_, bound);
       return NodeResult::kPruned;
@@ -863,6 +865,7 @@ BranchAndBound::NodeResult BranchAndBound::process_node(Node& node, std::vector<
 MipOutcome BranchAndBound::solve() {
   timer_ = Timer();
   outcome_ = MipOutcome{};
+  if (options_.objective_cutoff) incumbent_value_ = sense_ * *options_.objective_cutoff;
 
   // Root propagation becomes part of the root bounds.
   if (!propagate(integers_, nullptr)) {
