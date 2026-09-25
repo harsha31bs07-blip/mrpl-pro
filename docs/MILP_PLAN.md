@@ -25,7 +25,7 @@ The baseline is `main` at ba0046e. Full numbers are in [results/miplib.md](resul
   - Cause: no flow covers, no probing or clique information, and cuts only at the root.
 - **One core only.** All searches are single-threaded; the laptop has 16 hardware threads.
 
-## Targets
+## Targets (after the deadline)
 
 | Measure | Now | Target |
 |---|---|---|
@@ -35,6 +35,33 @@ The baseline is `main` at ba0046e. Full numbers are in [results/miplib.md](resul
 | Wrong answers | 0 | **0**, always |
 
 All targets are for a single thread. The parallel search (A6) is reported separately.
+
+## 48-hour schedule (deadline: 2026-09-27)
+
+The full plan below is more than 48 hours of work, so it is cut to what shows best to the
+judges. Code freezes at **T+36 h**; the last 12 hours are final benchmarks, docs and the demo.
+
+| Hours | Work | Benchmark (ask: laptop or cloud) |
+|---|---|---|
+| 0–2 | A1: exact time limit | A0 10-min baseline on the laptop, in parallel |
+| 2–12 | A3: diving, feasibility pump, RENS (sub-MIP), shift-and-propagate | 60 s screening |
+| 12–20 | A2 (lite): probing on binaries, coefficient tightening | 60 s screening |
+| 20–28 | Track B: two MRPL case families and `cases/demo.sh` | HiGHS cross-check |
+| 28–36 | A4 (lite): flow covers, clique cuts from probing | 60 s screening |
+| 36–40 | Final 10-min run, samaya and HiGHS, same machine | laptop |
+| 40–48 | Results docs, merge the teammate's PDLP/GPU work, demo rehearsal, buffer | – |
+
+**Dropped for the deadline:** A5 (conflict analysis), A6 (parallel tree search), cuts in the
+tree, zero-half cuts, root restarts, barrier and QP. If a step runs over, the next one is cut,
+never the tests or the verifier.
+
+**Targets for 48 hours (single thread):**
+- solved in 10 minutes: at least 12/62;
+- a feasible solution within 60 s: at least 48/62;
+- median gap at 60 s: at most 1.5%;
+- no wrong answers.
+
+The longer-term targets below still stand for after the deadline.
 
 ## Rules for every milestone
 
