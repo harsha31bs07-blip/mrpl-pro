@@ -123,6 +123,7 @@ class BranchAndBound {
   double cutoff() const;
   double effective_bound(double objective) const;
   double best_bound(double extra) const;
+  double remaining_time() const;  // Seconds left, minus the time to release the stored nodes.
   bool time_up() const;
 
   // Solutions.

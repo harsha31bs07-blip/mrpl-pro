@@ -13,6 +13,10 @@ namespace samaya {
 namespace {
 
 constexpr double kScoreFloor = 1e-6;
+// Releasing the stored nodes when the search ends takes about 1 us per node (0.85 us measured on
+// gen-ip002 with 175k open nodes). The time limit reserves this, with a margin, so a search with
+// millions of open nodes still finishes within the limit.
+constexpr double kReleaseSecondsPerNode = 2e-6;
 // Rounding followed by an LP over the continuous columns runs at the root and every this many
 // nodes, with this iteration budget.
 constexpr long long kRoundAndSolveFrequency = 50;
@@ -166,7 +170,7 @@ void BranchAndBound::apply_node_bounds(const Node& node) {
 SimplexStatus BranchAndBound::solve_relaxation(const std::vector<VarStatus>* start,
                                                long long iteration_limit) {
   simplex_->set_iteration_limit(iteration_limit);
-  simplex_->set_time_limit(std::max(0.0, options_.time_limit - timer_.seconds()));
+  simplex_->set_time_limit(std::max(0.0, remaining_time()));
   lp_status_ = start != nullptr && !start->empty() ? simplex_->solve(*start) : simplex_->solve();
   outcome_.lp_iterations += simplex_->iterations();
   const std::vector<double>& v = simplex_->values();
@@ -203,7 +207,12 @@ double BranchAndBound::best_bound(double extra) const {
   return effective_bound(bound);
 }
 
-bool BranchAndBound::time_up() const { return timer_.seconds() >= options_.time_limit; }
+double BranchAndBound::remaining_time() const {
+  const double stored = static_cast<double>(open_.size() + dive_stack_.size());
+  return options_.time_limit - timer_.seconds() - kReleaseSecondsPerNode * stored;
+}
+
+bool BranchAndBound::time_up() const { return remaining_time() <= 0.0; }
 
 double BranchAndBound::pseudocost(Index j, bool up) const {
   const int d = up ? 1 : 0;

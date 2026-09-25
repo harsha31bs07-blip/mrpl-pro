@@ -1,6 +1,7 @@
 // Branch-and-bound against the reference MILP solver (depth-first branch-and-bound on the dense
 // reference simplex) on random bounded MILPs, plus limits and known models.
 
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <random>
@@ -275,6 +276,57 @@ TEST(mip_node_limit_reports_limit_with_valid_bound) {
   CHECK(full.status == Status::kOptimal);
   CHECK(full.verified);
   CHECK_NEAR(full.objective, ref.objective, 1e-9);
+}
+
+TEST(mip_time_limit_is_respected) {
+  // A market-share model (equality rows over binaries with slack penalties) is far too hard to
+  // finish in the limit; the search must stop within it and report a valid bound.
+  std::mt19937 rng(7);
+  constexpr int kRows = 4;
+  constexpr int kBinaries = 40;
+  Model model;
+  std::vector<samaya::Triplet> t;
+  for (int j = 0; j < kBinaries; ++j) {
+    model.obj.push_back(0.0);
+    model.col_lower.push_back(0);
+    model.col_upper.push_back(1);
+    model.col_type.push_back(samaya::VarType::kInteger);
+  }
+  for (int i = 0; i < kRows; ++i) {
+    double sum = 0.0;
+    for (int j = 0; j < kBinaries; ++j) {
+      const double a = std::uniform_int_distribution<int>(0, 99)(rng);
+      t.push_back({i, j, a});
+      sum += a;
+    }
+    // sum_j a_ij x_j + s_i^- - s_i^+ = floor(sum / 2), minimizing the slacks.
+    for (int k = 0; k < 2; ++k) {
+      t.push_back({i, static_cast<Index>(model.obj.size()), k == 0 ? 1.0 : -1.0});
+      model.obj.push_back(1.0);
+      model.col_lower.push_back(0);
+      model.col_upper.push_back(kInf);
+      model.col_type.push_back(samaya::VarType::kContinuous);
+    }
+    model.row_lower.push_back(std::floor(sum / 2));
+    model.row_upper.push_back(std::floor(sum / 2));
+  }
+  model.A = samaya::SparseMatrix::from_triplets(kRows, static_cast<Index>(model.obj.size()),
+                                                std::move(t));
+  samaya::Params params;
+  params.log_level = 0;
+  params.time_limit = 0.5;
+  params.node_limit = 5000000;  // A backstop so a search that ignores the clock still ends.
+  const auto start = std::chrono::steady_clock::now();
+  const samaya::Result result = samaya::Solver(params).solve(model);
+  const double elapsed =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+  CHECK(result.status == Status::kTimeLimit || result.status == Status::kOptimal);
+  // Generous slack for sanitizer builds; the overshoot this guards against was seconds.
+  CHECK(elapsed <= params.time_limit + 0.5);
+  if (result.status == Status::kTimeLimit && std::isfinite(result.objective)) {
+    CHECK(result.verified);
+    CHECK(result.dual_bound <= result.objective + 1e-9);
+  }
 }
 
 TEST(mip_infeasible_and_unbounded_models) {
