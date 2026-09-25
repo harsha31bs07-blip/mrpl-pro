@@ -38,6 +38,10 @@ constexpr long long kSubMipNodes = 500;
 constexpr double kSubMipTimeFraction = 0.1;
 constexpr double kSubMipMaxSeconds = 30.0;
 constexpr long long kFirstRinsNode = 100;
+// RINS runs only while all sub-MIPs together took at most this share of the elapsed time plus
+// this many seconds (refsched_8c_6p_3u_26t spent 26 of 60 s in sub-MIPs without it; 46 s with).
+constexpr double kSubMipTimeShare = 0.1;
+constexpr double kSubMipFreeSeconds = 1.0;
 // Keeps the pseudocost ratio finite when a direction costs nothing.
 constexpr double kScoreFloorDive = 1e-6;
 
@@ -95,7 +99,8 @@ void BranchAndBound::run_heuristics(const Node& node, const std::vector<double>&
     next_dive_node_ = outcome_.nodes + dive_interval_;
   }
   if (options_.sub_mip_heuristics && !incumbent_.empty() && outcome_.nodes >= next_rins_node_ &&
-      incumbent_value_ < rins_incumbent_) {
+      incumbent_value_ < rins_incumbent_ &&
+      sub_mip_seconds_ <= kSubMipTimeShare * timer_.seconds() + kSubMipFreeSeconds) {
     rins_incumbent_ = incumbent_value_;
     next_rins_node_ = std::max(kFirstRinsNode, 2 * outcome_.nodes);
     rins(x);
@@ -329,6 +334,11 @@ void BranchAndBound::sub_mip(const std::vector<double>& lower, const std::vector
   const double seconds = std::min(kSubMipMaxSeconds, kSubMipTimeFraction * remaining);
   if (!(seconds > 0.0)) return;
   const Timer timer;
+  struct Account {  // Adds this sub-MIP's time to the total however it returns.
+    const Timer& timer;
+    double& total;
+    ~Account() { total += timer.seconds(); }
+  } account{timer, sub_mip_seconds_};
   Model sub = model_;
   sub.col_lower = lower;
   sub.col_upper = upper;

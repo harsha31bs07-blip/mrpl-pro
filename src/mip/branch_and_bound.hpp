@@ -241,6 +241,7 @@ class BranchAndBound {
   long long dive_interval_ = 10;
   long long next_rins_node_ = 0;
   double rins_incumbent_ = kInf;
+  double sub_mip_seconds_ = 0.0;
   std::mt19937 rng_{12345};
 
   // Parallel search: the shared pool (null when sequential), this worker's index and the pool
