@@ -97,6 +97,7 @@ bool Simplex::rebuild() {
     if (factor_.factorize(basic_) == 0) {
       compute_primal();
       compute_dual();
+      factor_valid_ = true;
       return true;
     }
     // Replace dependent basis columns with the logicals of the rows left unpivoted.
@@ -126,6 +127,7 @@ bool Simplex::rebuild() {
       dse_weight_[pos] = 1.0;
     }
   }
+  factor_valid_ = false;
   return false;
 }
 
@@ -436,9 +438,15 @@ Index Simplex::choose_entering_column() const {
 }
 
 SimplexStatus Simplex::dual_loop() {
-  if (!rebuild()) return SimplexStatus::kNumericalError;
+  // A warm start that just rebuilt (or reused) the factorization has current values: skip another
+  // factorization here. The optimal point is still confirmed on a fresh one below.
+  if (skip_rebuild_) {
+    skip_rebuild_ = false;
+  } else if (!rebuild()) {
+    return SimplexStatus::kNumericalError;
+  }
   correct_dual_infeasibilities();
-  bool fresh = true;
+  bool fresh = factor_.num_updates() == 0;
   const auto refresh = [&] {
     if (!rebuild()) return false;
     correct_dual_infeasibilities();
@@ -818,25 +826,48 @@ void Simplex::reset() {
   std::fill(devex_weight_.begin(), devex_weight_.end(), 1.0);
 }
 
+// Keeps a nonbasic status consistent with the bounds.
+VarStatus Simplex::normalized_status(Index j, VarStatus st) const {
+  const bool has_lower = lower_[j] > -kInf;
+  const bool has_upper = upper_[j] < kInf;
+  if (st == VarStatus::kAtLower && !has_lower) {
+    return has_upper ? VarStatus::kAtUpper : VarStatus::kAtZero;
+  }
+  if (st == VarStatus::kAtUpper && !has_upper) {
+    return has_lower ? VarStatus::kAtLower : VarStatus::kAtZero;
+  }
+  if (st == VarStatus::kAtZero && (has_lower || has_upper)) {
+    return has_lower ? VarStatus::kAtLower : VarStatus::kAtUpper;
+  }
+  return st;
+}
+
 SimplexStatus Simplex::solve(const std::vector<VarStatus>& start) {
   if (start.size() != static_cast<std::size_t>(nt_) ||
       std::count(start.begin(), start.end(), VarStatus::kBasic) != m_) {
     return solve();
   }
   reset();
+  // Same statuses as the factorized basis (a child solved right after its parent): keep the
+  // factorization and its updates, only the bounds and costs changed.
+  if (factor_valid_) {
+    bool same = true;
+    for (Index j = 0; j < nt_ && same; ++j) same = normalized_status(j, start[j]) == status_[j];
+    if (same) {
+      for (Index j = 0; j < nt_; ++j) {
+        if (status_[j] != VarStatus::kBasic) set_value_from_status(j);
+      }
+      compute_primal();
+      compute_dual();
+      correct_dual_infeasibilities();
+      skip_rebuild_ = true;
+      return phase2();
+    }
+  }
+  factor_valid_ = false;
   Index k = 0;
   for (Index j = 0; j < nt_; ++j) {
-    VarStatus st = start[j];
-    // Keep nonbasic statuses consistent with the bounds.
-    const bool has_lower = lower_[j] > -kInf;
-    const bool has_upper = upper_[j] < kInf;
-    if (st == VarStatus::kAtLower && !has_lower) {
-      st = has_upper ? VarStatus::kAtUpper : VarStatus::kAtZero;
-    } else if (st == VarStatus::kAtUpper && !has_upper) {
-      st = has_lower ? VarStatus::kAtLower : VarStatus::kAtZero;
-    } else if (st == VarStatus::kAtZero && (has_lower || has_upper)) {
-      st = has_lower ? VarStatus::kAtLower : VarStatus::kAtUpper;
-    }
+    const VarStatus st = normalized_status(j, start[j]);
     status_[j] = st;
     if (st == VarStatus::kBasic) {
       basic_[k] = j;
@@ -848,11 +879,13 @@ SimplexStatus Simplex::solve(const std::vector<VarStatus>& start) {
   }
   if (!rebuild()) return solve();
   correct_dual_infeasibilities();
+  skip_rebuild_ = true;
   return phase2();
 }
 
 SimplexStatus Simplex::solve() {
   reset();
+  factor_valid_ = false;
 
   // Slack basis.
   for (Index i = 0; i < m_; ++i) {

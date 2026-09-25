@@ -108,6 +108,7 @@ class Simplex {
 
   void reset();
   bool rebuild();
+  VarStatus normalized_status(Index j, VarStatus st) const;
   void compute_primal();
   void compute_dual();
   void compute_pivot_row();
@@ -145,6 +146,10 @@ class Simplex {
   Timer timer_;
 
   BasisFactor factor_;
+  // factor_ holds the current basic_ (with its updates). skip_rebuild_: set by a warm start whose
+  // values are current, so the first dual loop of phase 2 does not factorize again.
+  bool factor_valid_ = false;
+  bool skip_rebuild_ = false;
   std::vector<Index> basic_;
   std::vector<Index> position_;
   std::vector<VarStatus> status_;
