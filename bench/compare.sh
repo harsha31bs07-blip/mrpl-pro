@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Side-by-side comparison of samaya with the open-source solvers it competes with (HiGHS, SCIP,
-# CBC, GLPK), single-threaded with the same 1e-4 MIP gap, on one machine.
+# CBC, GLPK), with the same 1e-4 MIP gap and thread count, on one machine.
 #
 #   bench/compare.sh SET [SHARDS]
 #
@@ -8,7 +8,8 @@
 #           cases          MRPL cases (9) + generated MILPs (7), 300 s, all five solvers
 #           miplib60       MIPLIB small (62), 60 s, samaya HiGHS SCIP CBC
 #           miplib600      MIPLIB small (62), 600 s, samaya HiGHS SCIP
-#           miplib600-t6   MIPLIB small (62), 600 s, samaya with 6 threads (use SHARDS 2)
+#           miplib600-t6   MIPLIB small (62), 600 s, samaya and HiGHS with 6 threads each
+#                          (HiGHS 1.15 has a parallel MIP solver; use SHARDS 2)
 #   SHARDS  instances run at the same time (default 4; keep SHARDS x threads <= cores)
 #
 # Needs: the release build, python3 with highspy and pyscipopt, cbc and glpsol on PATH, and the
@@ -48,7 +49,8 @@ case "${set_name}" in
       limit=60
       baselines=(highspy scip cbc)
     elif [[ "${set_name}" == miplib600-t6 ]]; then
-      baselines=()
+      # Same thread count for both: HiGHS 1.15 searches the tree in parallel too.
+      baselines=(highspy)
       threads=6
     fi
     ;;
