@@ -83,6 +83,7 @@ above, which ignores such instances.
 | + reduced-cost fixing at every node | 46 | 10.0% | 7 | 0 |
 | + restart after the root (20% of integers fixed) | 46 | 10.0% | 7 | 0 |
 | + plunge into the child with the smaller pseudocost estimate | 48 | 9.7% | 7 | 0 |
+| + Feasibility Jump, dive step limit (same-day rerun of the previous build: 46, 12.3%, 7) | 51 | 10.2% | 7 | 0 |
 
 **Done:**
 - **A1:** runs end within the time limit (the node release time is reserved).
@@ -92,11 +93,17 @@ above, which ignores such instances.
 - **A6:** parallel tree search, `--threads N`.
 - **A correctness fix:** a node whose LP point was integral only within the tolerance could be
   pruned (found by the MRPL crude case).
+- **Feasibility Jump** (Luteberget and Sartor 2023, also in HiGHS 1.13+): LP-free weighted local
+  search before the root cuts. New solutions on neos-3381206-awhea (474; optimum 453),
+  graph20-20-1rand, neos-4738912-atrato, rococoC10-001000 and reblock115. Its point ignores the
+  objective, so the root still runs the objective pump while it is the incumbent.
+- **A dive fix it exposed:** a dive could repeat a step on a column already within the tolerance
+  of its integral bound, without an LP iteration, until the time limit (neos-2657525-crna). The
+  column is now snapped, and every step counts against the dive budget.
 
 **Next, from the per-instance analysis** ([results/comparison.md](results/comparison.md)):
-- A shifting heuristic for general integers. neos-3381206-awhea is cutting stock with general
-  integers: the pump ignores them, rounding is blocked by the equality rows, and RENS's
-  sub-problem is infeasible. HiGHS takes 8 s and SCIP 3 s.
+- neos-3381206-awhea now has a solution (Feasibility Jump) but its bound is stuck at 416 with no
+  cuts found (optimum 453). HiGHS takes 8 s and SCIP 3 s.
 - Path cuts on big-M networks: p200x1188c and mc11 keep large root gaps. Flow covers help
   sp150x300d but lower the root bound there.
 - Symmetry handling (fhnw-binpack4-4, graph20-20-1rand): not before the deadline.

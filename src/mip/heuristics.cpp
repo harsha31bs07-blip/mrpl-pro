@@ -7,6 +7,7 @@
 #include <functional>
 
 #include "mip/branch_and_bound.hpp"
+#include "mip/feasibility_jump.hpp"
 #include "presolve/presolve.hpp"
 
 namespace samaya {
@@ -38,6 +39,12 @@ constexpr long long kSubMipNodes = 500;
 constexpr double kSubMipTimeFraction = 0.1;
 constexpr double kSubMipMaxSeconds = 30.0;
 constexpr long long kFirstRinsNode = 100;
+// Feasibility Jump: at most this many seconds (and this share of the time limit), and this many
+// row/column visits per matrix nonzero plus a minimum.
+constexpr double kJumpMaxSeconds = 5.0;
+constexpr double kJumpTimeFraction = 0.05;
+constexpr double kJumpWorkPerNonzero = 20000.0;
+constexpr long long kJumpMinWork = 10000000;
 // RINS runs only while all sub-MIPs together took at most this share of the elapsed time plus
 // this many seconds (refsched_8c_6p_3u_26t spent 26 of 60 s in sub-MIPs without it; 46 s with).
 constexpr double kSubMipTimeShare = 0.1;
@@ -46,6 +53,29 @@ constexpr double kSubMipFreeSeconds = 1.0;
 constexpr double kScoreFloorDive = 1e-6;
 
 }  // namespace
+
+// Feasibility Jump before the root LP (as in HiGHS and Xpress): LP-free, so it can find a first
+// solution where the LP-based heuristics do not (general integers, equality-heavy models).
+void BranchAndBound::run_feasibility_jump() {
+  double seconds = kJumpMaxSeconds;
+  if (std::isfinite(options_.time_limit)) {
+    seconds = std::min(seconds, kJumpTimeFraction * options_.time_limit);
+  }
+  const auto work = static_cast<long long>(kJumpWorkPerNonzero *
+                                           static_cast<double>(model_.A.nnz())) +
+                    kJumpMinWork;
+  const Timer timer;
+  const FeasibilityJumpResult jump =
+      feasibility_jump(model_, original_rows_, lower_, upper_, seconds, work, 12345u);
+  const bool improved = jump.found && try_solution(jump.x);
+  if (improved) {
+    ++outcome_.heuristic_solutions;
+    jump_incumbent_value_ = incumbent_value_;
+  }
+  log_.log(1, "MIP feasibility jump: %s after %lld steps, %.2f s%s",
+           jump.found ? "found a solution" : "no solution", jump.steps, timer.seconds(),
+           jump.found && !improved ? " (not accepted)" : "");
+}
 
 void BranchAndBound::undo_bounds(std::size_t mark) {
   const bool logging = logging_undo_;
@@ -66,7 +96,9 @@ void BranchAndBound::run_heuristics(const Node& node, const std::vector<double>&
     const long long budget = std::max(
         kMinHeuristicIterations,
         static_cast<long long>(kRootIterationFactor * static_cast<double>(outcome_.lp_iterations)));
-    if (incumbent_.empty()) feasibility_pump(x, basis, budget);
+    if (incumbent_.empty() || incumbent_value_ == jump_incumbent_value_) {
+      feasibility_pump(x, basis, budget);
+    }
     for (const DiveRule rule : {DiveRule::kCoefficient, DiveRule::kFractional,
                                 DiveRule::kPseudocost, DiveRule::kGuided}) {
       if (time_up()) return;
@@ -116,6 +148,7 @@ void BranchAndBound::dive(DiveRule rule, const std::vector<double>& x0,
   logging_undo_ = true;
   std::vector<double> x = x0;
   std::vector<VarStatus> basis = basis0;
+  long long steps = 0;
   for (;;) {
     Index best = -1;
     bool best_up = false;
@@ -124,6 +157,12 @@ void BranchAndBound::dive(DiveRule rule, const std::vector<double>& x0,
     for (const Index j : integers_) {
       const double v = x[j];
       if (lower_[j] == upper_[j] || !is_fractional(v)) continue;
+      if (std::ceil(v) <= lower_[j] || std::floor(v) >= upper_[j]) {
+        // Within the primal tolerance of an integral bound: rounding changes no bound, so a dive
+        // step on it would repeat forever. Snap it instead.
+        x[j] = std::clamp(std::round(v), lower_[j], upper_[j]);
+        continue;
+      }
       const double f = v - std::floor(v);
       const int locks_down = down_locks_[j];
       const int locks_up = up_locks_[j];
@@ -170,7 +209,10 @@ void BranchAndBound::dive(DiveRule rule, const std::vector<double>& x0,
       simple_rounding(x);
       break;
     }
-    if (time_up() || outcome_.lp_iterations - start >= budget) break;
+    // Each step counts at least one unit of effort: a step that moves a column by one without an
+    // LP iteration (a bound flip) could otherwise walk across a huge integer domain for free.
+    ++steps;
+    if (time_up() || outcome_.lp_iterations - start + steps >= budget) break;
 
     bool ok = false;
     bool abort = false;
@@ -184,7 +226,7 @@ void BranchAndBound::dive(DiveRule rule, const std::vector<double>& x0,
         set_bound(best, lower_[best], std::floor(v));
       }
       if (propagate({best}, nullptr)) {
-        const long long left = std::max(1LL, budget - (outcome_.lp_iterations - start));
+        const long long left = std::max(1LL, budget - (outcome_.lp_iterations - start + steps));
         const SimplexStatus status = solve_relaxation(&basis, left);
         if (status == SimplexStatus::kOptimal) {
           ok = effective_bound(relaxation_objective()) < cutoff();
@@ -373,7 +415,10 @@ void BranchAndBound::sub_mip(const std::vector<double>& lower, const std::vector
   std::vector<double> unused_y;
   presolve.postsolve(out.x, {}, x, unused_y);
   const bool improved = try_solution(std::move(x));
-  if (improved) ++outcome_.heuristic_solutions;
+  if (improved) {
+    ++outcome_.heuristic_solutions;
+    jump_incumbent_value_ = incumbent_value_;
+  }
   log_.log(2, "mip: %s %s after %lld nodes, %.2f s", name,
            improved ? "improved the incumbent" : "found nothing better", out.nodes,
            timer.seconds());

@@ -1127,6 +1127,7 @@ MipOutcome BranchAndBound::solve() {
   }
   for (const Index j : touched_) is_touched_[j] = 0;
   touched_.clear();
+  if (options_.heuristics && !integers_.empty()) run_feasibility_jump();
   root_cut_loop();
 
   std::optional<Node> current = Node{};

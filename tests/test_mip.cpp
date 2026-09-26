@@ -12,6 +12,7 @@
 #include "core/log.hpp"
 #include "mip/branch_and_bound.hpp"
 #include "mip/cuts.hpp"
+#include "mip/feasibility_jump.hpp"
 #include "reference_milp.hpp"
 #include "samaya/io.hpp"
 #include "samaya/solver.hpp"
@@ -734,6 +735,33 @@ TEST(mip_restart_after_root_matches_reference) {
   CHECK(restarted > 5);
 }
 
+TEST(mip_feasibility_jump_finds_verified_points) {
+  // Feasibility Jump alone (no LP) on feasible random models and set partitioning: every point it
+  // returns must satisfy all rows, bounds and integrality, and it must find most of them.
+  std::mt19937 rng(81);
+  int found = 0;
+  int models = 0;
+  int invalid = 0;
+  for (int k = 0; k < 160; ++k) {
+    const Model model = k % 2 == 0 ? random_milp(MilpFamily::kMixed, rng) : set_partitioning(rng);
+    const ReferenceMilpResult ref = samaya::test::reference_milp(model);
+    if (ref.status != ReferenceMilpResult::Status::kOptimal) continue;
+    ++models;
+    const samaya::FeasibilityJumpResult jump = samaya::feasibility_jump(
+        model, model.num_rows(), model.col_lower, model.col_upper, 5.0, 2000000, 7u + k);
+    if (!jump.found) continue;
+    ++found;
+    samaya::VerifyTolerances tol;
+    tol.primal = 1e-7;
+    if (!samaya::verify_primal(model, jump.x, tol).ok) ++invalid;
+  }
+  std::printf("  %d feasible models, feasibility jump found %d points, %d invalid\n", models,
+              found, invalid);
+  CHECK_EQ(invalid, 0);
+  CHECK(models > 100);
+  CHECK(found * 10 >= models * 8);
+}
+
 TEST(mip_random_models_match_reference_without_cuts) {
   std::mt19937 rng(21);
   samaya::Params params;
@@ -873,6 +901,26 @@ TEST(mip_nearly_integral_lp_solution_is_repaired_not_pruned) {
   CHECK(result.status == Status::kOptimal);
   CHECK(result.verified);
   CHECK(std::fabs(result.objective - 708749.0576) <= 1e-4 * 708749.0576);
+}
+
+TEST(mip_dives_stop_on_columns_already_at_an_integral_bound) {
+  // Regression (MIPLIB 2017 neos-2657525-crna, CC BY 4.0): a node dive met a general integer at
+  // 1907.99999 with lower bound 1908. It counts as fractional, but rounding it changes no bound,
+  // so the dive repeated the step without an LP iteration until the time limit (300k steps). The
+  // search must reach its node limit well within the time limit. Known optimum 1.810748.
+  const Model model =
+      samaya::read_mps(std::string(SAMAYA_TEST_DATA_DIR) + "/neos-2657525-crna.mps");
+  samaya::Params params;
+  params.log_level = 0;
+  params.threads = 1;
+  params.node_limit = 5000;
+  params.time_limit = 600.0;
+  const samaya::Result result = samaya::Solver(params).solve(model);
+  CHECK(result.status == Status::kNodeLimit);
+  if (std::isfinite(result.objective)) {
+    CHECK(result.verified);
+    CHECK(result.objective >= 1.810748 - 1e-6);
+  }
 }
 
 TEST(mip_infeasible_and_unbounded_models) {

@@ -150,6 +150,7 @@ class BranchAndBound {
   bool probe();
 
   // Heuristics (heuristics.cpp).
+  void run_feasibility_jump();
   enum class DiveRule : std::uint8_t { kFractional, kCoefficient, kPseudocost, kGuided };
   void run_heuristics(const Node& node, const std::vector<double>& x,
                       const std::vector<VarStatus>& basis);
@@ -251,6 +252,9 @@ class BranchAndBound {
   long long dive_interval_ = 10;
   long long next_rins_node_ = 0;
   double rins_incumbent_ = kInf;
+  // The incumbent value Feasibility Jump found (kInf if none): its point ignores the objective,
+  // so the root still runs the objective feasibility pump while it is the incumbent.
+  double jump_incumbent_value_ = kInf;
   double sub_mip_seconds_ = 0.0;
   std::mt19937 rng_{12345};
 
