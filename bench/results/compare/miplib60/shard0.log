@@ -1,0 +1,60 @@
+50v-10               samaya   time_limit       obj=3831.2799976468077 t=59.986s
+50v-10               highspy  time_limit       obj=3553.439985334873 t=60.006s
+50v-10               scip     time_limit       obj=3430.9899930208912 t=60.001s
+50v-10               cbc      time_limit       obj=3575.50000313 t=61.968s
+ic97_potential       samaya   time_limit       obj=None t=59.969s
+ic97_potential       highspy  time_limit       obj=3951.9999999999736 t=60.004s
+ic97_potential       scip     time_limit       obj=4007.0 t=60.000s
+ic97_potential       cbc      time_limit       obj=3949.0 t=61.086s
+neos-911970          samaya   time_limit       obj=60.549999854385696 t=59.845s
+neos-911970          highspy  optimal          obj=54.76000000000019 t=12.413s
+neos-911970          scip     optimal          obj=54.76 t=12.467s
+neos-911970          cbc      time_limit       obj=55.53 t=61.457s
+markshare_4_0        samaya   optimal          obj=1.0000000000000142 t=15.444s
+markshare_4_0        highspy  time_limit       obj=1.0 t=60.006s
+markshare_4_0        scip     time_limit       obj=1.0 t=60.000s
+markshare_4_0        cbc      time_limit       obj=1.0 t=89.037s
+neos5                samaya   time_limit       obj=15 t=59.886s
+neos5                highspy  time_limit       obj=14.999999999982984 t=60.002s
+neos5                scip     time_limit       obj=15.0 t=60.001s
+neos5                cbc      time_limit       obj=15.0 t=68.882s
+neos-5107597-kakapo  samaya   time_limit       obj=None t=60.018s
+neos-5107597-kakapo  highspy  time_limit       obj=None t=60.020s
+neos-5107597-kakapo  scip     time_limit       obj=5436.0 t=60.003s
+neos-5107597-kakapo  cbc      time_limit       obj=None t=61.170s
+neos-2657525-crna    samaya   time_limit       obj=30.6960116 t=59.929s
+neos-2657525-crna    highspy  time_limit       obj=None t=60.006s
+neos-2657525-crna    scip     time_limit       obj=8.2809932 t=60.001s
+neos-2657525-crna    cbc      time_limit       obj=None t=68.086s
+app1-1               samaya   optimal          obj=-3 t=15.558s
+app1-1               highspy  optimal          obj=-3.0 t=22.414s
+app1-1               scip     optimal          obj=-3.0 t=8.112s
+app1-1               cbc      optimal          obj=-3.0 t=5.603s
+glass4               samaya   time_limit       obj=2516690632.8333297 t=59.885s
+glass4               highspy  time_limit       obj=1800017500.0 t=60.002s
+glass4               scip     time_limit       obj=2100017200.0 t=60.000s
+glass4               cbc      time_limit       obj=2033351033.3333333 t=61.668s
+fhnw-binpack4-4      samaya   time_limit       obj=None t=59.955s
+fhnw-binpack4-4      highspy  time_limit       obj=None t=60.002s
+fhnw-binpack4-4      scip     infeasible       obj=None t=18.033s
+fhnw-binpack4-4      cbc      time_limit       obj=None t=61.642s
+gmu-35-40            samaya   time_limit       obj=-2399308.0864 t=59.891s
+gmu-35-40            highspy  time_limit       obj=-2405541.2503000004 t=60.014s
+gmu-35-40            scip     time_limit       obj=-2405176.3835999994 t=59.552s
+gmu-35-40            cbc      time_limit       obj=-2401352.5298 t=67.096s
+timtab1              samaya   time_limit       obj=None t=59.959s
+timtab1              highspy  optimal          obj=764773.9999997794 t=59.099s
+timtab1              scip     time_limit       obj=764771.9999998803 t=60.000s
+timtab1              cbc      time_limit       obj=794647.99999988 t=61.085s
+binkar10_1           samaya   time_limit       obj=6752.040004733275 t=59.965s
+binkar10_1           highspy  optimal          obj=6742.200024000088 t=20.266s
+binkar10_1           scip     optimal          obj=6742.200023998389 t=24.877s
+binkar10_1           cbc      optimal          obj=6742.200024 t=55.722s
+
+Wrote bench/results/compare/miplib60/shard0.csv
+Status/objective disagreements with baselines: 0
+Known solutions: 2 solved correctly, 0 wrong, 0 not in miplib2017.solu
+samaya   solved 2/13, shifted geomean 49.928s
+highspy  solved 4/13, shifted geomean 46.609s
+scip     solved 4/13, shifted geomean 41.065s
+cbc      solved 2/13, shifted geomean 52.065s

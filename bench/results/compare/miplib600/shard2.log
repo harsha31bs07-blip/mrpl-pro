@@ -1,0 +1,16 @@
+ran14x18-disj-8      samaya   time_limit       obj=3779 t=599.898s
+ran14x18-disj-8      highspy  time_limit       obj=3712.000000006741 t=600.010s
+ran14x18-disj-8      scip     time_limit       obj=3714.000000012197 t=600.001s
+n5-3                 samaya   time_limit       obj=9156.999999652451 t=599.984s
+n5-3                 highspy  optimal          obj=8105.000000000003 t=41.020s
+n5-3                 scip     optimal          obj=8104.999999999999 t=49.043s
+b1c1s1               samaya   time_limit       obj=31965.649998121364 t=599.998s
+b1c1s1               highspy  time_limit       obj=25252.869999999995 t=600.007s
+b1c1s1               scip     time_limit       obj=27429.139999999967 t=600.002s
+cost266-UUE          samaya   time_limit       obj=25357386.5 t=599.979s
+cost266-UUE          highspy  time_limit       obj=25901408.02 t=600.015s
+cost266-UUE          scip     time_limit       obj=25148940.559999958 t=600.001s
+sp150x300d           samaya   time_limit       obj=70 t=599.553s
+sp150x300d           highspy  optimal          obj=69.0 t=0.051s
+sp150x300d           scip     optimal          obj=69.0 t=0.263s
+neos-3024952-loue    samaya   time_limit       obj=None t=600.015s

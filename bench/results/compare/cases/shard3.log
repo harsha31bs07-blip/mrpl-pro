@@ -1,0 +1,23 @@
+mrpl_plan_large      samaya   optimal          obj=12601068.367035596 t=0.266s
+mrpl_plan_large      highspy  optimal          obj=12601068.367035607 t=0.063s
+mrpl_plan_large      scip     optimal          obj=12601068.367035598 t=0.222s
+mrpl_plan_large      cbc      optimal          obj=12601068.0 t=0.098s
+mrpl_plan_large      glpk     optimal          obj=12601068.37 t=0.094s
+mrpl_utility_small   samaya   optimal          obj=235.20103934577966 t=0.129s
+mrpl_utility_small   highspy  optimal          obj=235.20103934885188 t=0.057s
+mrpl_utility_small   scip     optimal          obj=235.2010393488519 t=0.029s
+mrpl_utility_small   cbc      optimal          obj=235.20103935 t=0.136s
+mrpl_utility_small   glpk     optimal          obj=235.2010393 t=0.156s
+refsched_6c_4p_2u_6t samaya   optimal          obj=52496.87897802249 t=0.727s
+refsched_6c_4p_2u_6t highspy  optimal          obj=52496.87897802252 t=1.883s
+refsched_6c_4p_2u_6t scip     optimal          obj=52496.87897802252 t=0.873s
+refsched_6c_4p_2u_6t cbc      optimal          obj=52496.87897802 t=0.450s
+refsched_6c_4p_2u_6t glpk     optimal          obj=52496.87898 t=0.157s
+
+Wrote bench/results/compare/cases/shard3.csv
+Status/objective disagreements with baselines: 0
+samaya   solved 3/3, shifted geomean 0.371s
+highspy  solved 3/3, shifted geomean 0.634s
+scip     solved 3/3, shifted geomean 0.368s
+cbc      solved 3/3, shifted geomean 0.227s
+glpk     solved 3/3, shifted geomean 0.136s

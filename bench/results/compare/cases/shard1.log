@@ -1,0 +1,23 @@
+mrpl_crude_medium    samaya   optimal          obj=1380671.0394256392 t=0.500s
+mrpl_crude_medium    highspy  optimal          obj=1380690.5656418216 t=0.756s
+mrpl_crude_medium    scip     gaplimit         obj=1380690.5656418216 t=1.189s
+mrpl_crude_medium    cbc      optimal          obj=1380690.56564182 t=0.754s
+mrpl_crude_medium    glpk     optimal          obj=1380690.566 t=0.306s
+mrpl_utility_large   samaya   optimal          obj=934.7444049242968 t=2.035s
+mrpl_utility_large   highspy  optimal          obj=934.7444049544531 t=0.396s
+mrpl_utility_large   scip     optimal          obj=934.7444049544529 t=0.109s
+mrpl_utility_large   cbc      optimal          obj=934.74440495 t=0.400s
+mrpl_utility_large   glpk     time_limit       obj=940.8222907 t=300.094s
+knapsack_40x3        samaya   optimal          obj=1426.75 t=0.101s
+knapsack_40x3        highspy  optimal          obj=1426.75 t=0.495s
+knapsack_40x3        scip     optimal          obj=1426.75 t=0.270s
+knapsack_40x3        cbc      optimal          obj=1426.75 t=0.215s
+knapsack_40x3        glpk     optimal          obj=1426.75 t=0.018s
+
+Wrote bench/results/compare/cases/shard1.csv
+Status/objective disagreements with baselines: 0
+samaya   solved 3/3, shifted geomean 0.848s
+highspy  solved 3/3, shifted geomean 0.548s
+scip     solved 2/3, shifted geomean 21.808s
+cbc      solved 3/3, shifted geomean 0.454s
+glpk     solved 2/3, shifted geomean 21.750s

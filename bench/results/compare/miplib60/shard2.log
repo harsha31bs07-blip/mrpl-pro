@@ -1,0 +1,56 @@
+ran14x18-disj-8      samaya   time_limit       obj=3832.999997989701 t=59.988s
+ran14x18-disj-8      highspy  time_limit       obj=3735.999997619834 t=60.007s
+ran14x18-disj-8      scip     time_limit       obj=3744.000000061482 t=60.001s
+ran14x18-disj-8      cbc      time_limit       obj=3809.0 t=61.229s
+n5-3                 samaya   time_limit       obj=10675.013154358336 t=60.005s
+n5-3                 highspy  optimal          obj=8105.000000000003 t=38.058s
+n5-3                 scip     optimal          obj=8104.999999999999 t=46.097s
+n5-3                 cbc      time_limit       obj=8539.0 t=62.523s
+b1c1s1               samaya   time_limit       obj=38120.60999823519 t=60.016s
+b1c1s1               highspy  time_limit       obj=28095.620000000003 t=60.011s
+b1c1s1               scip     time_limit       obj=69333.52 t=60.002s
+b1c1s1               cbc      time_limit       obj=29372.31 t=60.403s
+cost266-UUE          samaya   time_limit       obj=27785615.98 t=60.017s
+cost266-UUE          highspy  time_limit       obj=27613514.66 t=60.010s
+cost266-UUE          scip     time_limit       obj=25719490.04 t=60.007s
+cost266-UUE          cbc      time_limit       obj=26464544.30999995 t=60.877s
+sp150x300d           samaya   time_limit       obj=70 t=59.963s
+sp150x300d           highspy  optimal          obj=69.0 t=0.079s
+sp150x300d           scip     optimal          obj=69.0 t=0.372s
+sp150x300d           cbc      time_limit       obj=69.0 t=64.420s
+neos-3024952-loue    samaya   time_limit       obj=None t=60.017s
+neos-3024952-loue    highspy  time_limit       obj=None t=60.265s
+neos-3024952-loue    scip     time_limit       obj=None t=60.001s
+neos-3024952-loue    cbc      time_limit       obj=None t=60.428s
+neos-3627168-kasai   samaya   time_limit       obj=992381.8799999997 t=60.007s
+neos-3627168-kasai   highspy  time_limit       obj=988585.6199999998 t=60.008s
+neos-3627168-kasai   scip     time_limit       obj=988585.6199999998 t=60.001s
+neos-3627168-kasai   cbc      time_limit       obj=989533.14 t=63.850s
+csched008            samaya   time_limit       obj=184 t=59.996s
+csched008            highspy  time_limit       obj=178.0 t=60.009s
+csched008            scip     time_limit       obj=None t=60.000s
+csched008            cbc      time_limit       obj=None t=61.527s
+supportcase26        samaya   time_limit       obj=1853.1883106214982 t=59.933s
+supportcase26        highspy  time_limit       obj=1772.9625225490113 t=60.004s
+supportcase26        scip     time_limit       obj=1827.7110431140811 t=60.000s
+supportcase26        cbc      time_limit       obj=1840.40648074 t=62.929s
+mcsched              samaya   time_limit       obj=216909 t=60.016s
+mcsched              highspy  time_limit       obj=212859.99999999985 t=60.006s
+mcsched              scip     time_limit       obj=212809.0 t=60.001s
+mcsched              cbc      time_limit       obj=213840.0 t=59.498s
+fastxgemm-n2r6s0t2   samaya   time_limit       obj=527 t=60.014s
+fastxgemm-n2r6s0t2   highspy  time_limit       obj=526.9999999999949 t=60.007s
+fastxgemm-n2r6s0t2   scip     time_limit       obj=527.0 t=60.001s
+fastxgemm-n2r6s0t2   cbc      time_limit       obj=527.0 t=60.240s
+csched007            samaya   time_limit       obj=None t=60.005s
+csched007            highspy  time_limit       obj=559.9999999999914 t=60.003s
+csched007            scip     time_limit       obj=None t=60.000s
+csched007            cbc      time_limit       obj=None t=61.047s
+
+Wrote bench/results/compare/miplib60/shard2.csv
+Status/objective disagreements with baselines: 0
+Known solutions: 0 solved correctly, 0 wrong, 0 not in miplib2017.solu
+samaya   solved 0/12, shifted geomean 60.000s
+highspy  solved 2/12, shifted geomean 47.723s
+scip     solved 2/12, shifted geomean 48.611s
+cbc      solved 0/12, shifted geomean 60.000s

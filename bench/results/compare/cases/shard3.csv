@@ -1,0 +1,16 @@
+instance,solver,status,objective,solve_seconds,wall_seconds,nodes,class,verified
+mrpl_plan_large,samaya,optimal,12601068.367035596,0.259930944,0.2662,0,LP,True
+mrpl_plan_large,highspy,optimal,12601068.367035607,0.06274324400055775,0.0627,,LP,
+mrpl_plan_large,scip,optimal,12601068.367035598,0.22165257500000735,0.2217,,LP,
+mrpl_plan_large,cbc,optimal,12601068.0,0.0975838840004144,0.0976,,,
+mrpl_plan_large,glpk,optimal,12601068.37,0.09418392199950176,0.0942,,,
+mrpl_utility_small,samaya,optimal,235.20103934577966,0.126486384,0.1287,3,MILP,True
+mrpl_utility_small,highspy,optimal,235.20103934885188,0.05730494399995223,0.0573,1,MILP,
+mrpl_utility_small,scip,optimal,235.2010393488519,0.028493583999988914,0.0285,1,MILP,
+mrpl_utility_small,cbc,optimal,235.20103935,0.13573475999965012,0.1357,0,,
+mrpl_utility_small,glpk,optimal,235.2010393,0.15612101599981543,0.1561,,,
+refsched_6c_4p_2u_6t,samaya,optimal,52496.87897802249,0.723884101,0.7265,2672,MILP,True
+refsched_6c_4p_2u_6t,highspy,optimal,52496.87897802252,1.8828113879999364,1.8828,323,MILP,
+refsched_6c_4p_2u_6t,scip,optimal,52496.87897802252,0.8726204580007106,0.8726,801,MILP,
+refsched_6c_4p_2u_6t,cbc,optimal,52496.87897802,0.4501483639996877,0.4501,764,,
+refsched_6c_4p_2u_6t,glpk,optimal,52496.87898,0.15668023400030506,0.1567,,,

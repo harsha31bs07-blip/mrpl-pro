@@ -1,0 +1,28 @@
+mrpl_crude_large     samaya   optimal          obj=1596509.8832812055 t=13.873s
+mrpl_crude_large     highspy  optimal          obj=1596620.8832805906 t=1.694s
+mrpl_crude_large     scip     gaplimit         obj=1596572.4878037872 t=1.788s
+mrpl_crude_large     cbc      optimal          obj=1596620.88328058 t=1.580s
+mrpl_crude_large     glpk     optimal          obj=1596509.883 t=121.260s
+mrpl_plan_small      samaya   optimal          obj=933184.6945399827 t=0.004s
+mrpl_plan_small      highspy  optimal          obj=933184.6945399826 t=0.002s
+mrpl_plan_small      scip     optimal          obj=933184.6945399826 t=0.003s
+mrpl_plan_small      cbc      optimal          obj=933184.69 t=0.005s
+mrpl_plan_small      glpk     optimal          obj=933184.6945 t=0.003s
+facility_20x80       samaya   optimal          obj=5709.306442711055 t=0.047s
+facility_20x80       highspy  optimal          obj=5709.306442711184 t=0.077s
+facility_20x80       scip     optimal          obj=5709.306442711184 t=0.116s
+facility_20x80       cbc      optimal          obj=5709.30644271 t=0.217s
+facility_20x80       glpk     optimal          obj=5709.306443 t=0.102s
+refsched_8c_6p_3u_26t samaya   optimal          obj=537893.4278982759 t=37.269s
+refsched_8c_6p_3u_26t highspy  optimal          obj=537909.220728702 t=29.327s
+refsched_8c_6p_3u_26t scip     optimal          obj=537917.9742794468 t=29.020s
+refsched_8c_6p_3u_26t cbc      optimal          obj=537917.97427945 t=74.753s
+refsched_8c_6p_3u_26t glpk     time_limit       obj=535902.6 t=300.063s
+
+Wrote bench/results/compare/cases/shard0.csv
+Status/objective disagreements with baselines: 0
+samaya   solved 4/4, shifted geomean 8.351s
+highspy  solved 4/4, shifted geomean 4.673s
+scip     solved 3/4, shifted geomean 23.262s
+cbc      solved 4/4, shifted geomean 7.797s
+glpk     solved 3/4, shifted geomean 35.030s

@@ -1,0 +1,60 @@
+reblock115           samaya   time_limit       obj=None t=60.032s
+reblock115           highspy  time_limit       obj=-36170042.27244494 t=60.010s
+reblock115           scip     time_limit       obj=-32518913.276699394 t=60.003s
+reblock115           cbc      time_limit       obj=-36278048.29565845 t=60.677s
+pk1                  samaya   optimal          obj=11 t=50.101s
+pk1                  highspy  time_limit       obj=13.999999999999915 t=60.004s
+pk1                  scip     time_limit       obj=11.0 t=60.000s
+pk1                  cbc      optimal          obj=11.0 t=45.401s
+p200x1188c           samaya   time_limit       obj=15078 t=59.991s
+p200x1188c           highspy  optimal          obj=15078.0 t=0.752s
+p200x1188c           scip     optimal          obj=15078.0 t=4.455s
+p200x1188c           cbc      time_limit       obj=15531.0 t=62.171s
+qap10                samaya   time_limit       obj=378 t=60.019s
+qap10                highspy  time_limit       obj=348.0 t=67.200s
+qap10                scip     time_limit       obj=454.0 t=60.010s
+qap10                cbc      time_limit       obj=358.0 t=60.203s
+enlight_hard         samaya   time_limit       obj=37 t=59.959s
+enlight_hard         highspy  optimal          obj=37.0 t=13.085s
+enlight_hard         scip     optimal          obj=37.0 t=0.003s
+enlight_hard         cbc      time_limit       obj=None t=61.024s
+neos-4954672-berkel  samaya   time_limit       obj=3920237 t=59.996s
+neos-4954672-berkel  highspy  time_limit       obj=2694400.0 t=60.002s
+neos-4954672-berkel  scip     time_limit       obj=2716013.0 t=60.001s
+neos-4954672-berkel  cbc      time_limit       obj=2800750.0 t=61.631s
+neos-3381206-awhea   samaya   time_limit       obj=None t=59.906s
+neos-3381206-awhea   highspy  optimal          obj=453.0 t=7.602s
+neos-3381206-awhea   scip     optimal          obj=453.0 t=2.400s
+neos-3381206-awhea   cbc      optimal          obj=453.0 t=12.900s
+beasleyC3            samaya   time_limit       obj=946 t=60.013s
+beasleyC3            highspy  optimal          obj=754.0000000000001 t=26.844s
+beasleyC3            scip     optimal          obj=754.0 t=17.558s
+beasleyC3            cbc      time_limit       obj=804.0 t=60.502s
+gmu-35-50            samaya   time_limit       obj=-2604690.1717 t=59.926s
+gmu-35-50            highspy  time_limit       obj=-2607340.2762 t=60.004s
+gmu-35-50            scip     time_limit       obj=-2606073.017 t=60.003s
+gmu-35-50            cbc      time_limit       obj=-2604846.7085 t=68.174s
+fhnw-binpack4-48     samaya   time_limit       obj=None t=60.015s
+fhnw-binpack4-48     highspy  time_limit       obj=None t=60.045s
+fhnw-binpack4-48     scip     time_limit       obj=None t=60.007s
+fhnw-binpack4-48     cbc      time_limit       obj=None t=59.458s
+rococoC10-001000     samaya   time_limit       obj=None t=60.012s
+rococoC10-001000     highspy  time_limit       obj=11713.0 t=60.004s
+rococoC10-001000     scip     time_limit       obj=11826.0 t=60.001s
+rococoC10-001000     cbc      time_limit       obj=11569.0 t=59.888s
+pg                   samaya   time_limit       obj=-8653.940397671786 t=60.007s
+pg                   highspy  optimal          obj=-8674.342607117029 t=6.202s
+pg                   scip     gaplimit         obj=-8674.342607117022 t=22.184s
+pg                   cbc      optimal          obj=-8674.34260712 t=41.332s
+pg5_34               samaya   time_limit       obj=-14310.964575578633 t=60.006s
+pg5_34               highspy  time_limit       obj=-14315.761273777769 t=60.005s
+pg5_34               scip     time_limit       obj=-14313.559958294312 t=60.001s
+pg5_34               cbc      time_limit       obj=-14308.14196695 t=60.721s
+
+Wrote bench/results/compare/miplib60/shard1.csv
+Status/objective disagreements with baselines: 0
+Known solutions: 1 solved correctly, 0 wrong, 0 not in miplib2017.solu
+samaya   solved 1/13, shifted geomean 59.184s
+highspy  solved 5/13, shifted geomean 32.561s
+scip     solved 4/13, shifted geomean 33.495s
+cbc      solved 3/13, shifted geomean 51.602s
