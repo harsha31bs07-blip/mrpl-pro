@@ -68,3 +68,35 @@ The crude scheduling case found a real bug in the MILP solver. A node whose LP s
 integral only within the tolerance was pruned: a 0.9999995 cargo binary times 130 kt broke a
 tank balance once rounded. The solver then reported "infeasible". It is fixed, and the model is
 now a regression test (`tests/instances/mrpl_crude_small.mps`).
+
+## Re-planning from yesterday's plan
+
+Schedules are re-planned every day with revised data. `--update SEED` also writes a variant of
+each scheduling model with the same plant and the same column names, but revised data:
+- **crude:** opening stocks as measured (within 5%), and one term cargo delayed by one or two
+  days.
+- **utility:** the demand forecast revised (each hour within 5%).
+
+```sh
+python3 cases/mrpl.py generate --out cases/instances --update 1
+samaya --solution day1.sol cases/instances/mrpl_utility_large.mps
+samaya --mip-start day1.sol cases/instances/mrpl_utility_large_update1.mps
+```
+
+`--mip-start` matches columns by name. What it does with the start:
+- **Still feasible:** it becomes the incumbent unchanged, so the plan does not move without
+  reason.
+- **Every integer decision has a value:** those decisions are kept and the continuous columns
+  are re-solved for today's data.
+- **Otherwise:** it is the starting point of the Feasibility Jump repair.
+
+The search still proves optimality either way.
+
+**What it gains here (measured):** little. On these cases samaya already finds solutions within
+0.3% of the optimum at the root, and most of the time goes to proving optimality.
+- mrpl_utility_large_update1: 6.1 s cold, 5.2 s warm.
+- mrpl_crude_large_update1: 2.2 s cold, 2.0 s warm.
+
+Yesterday's on/off decisions were not feasible for today's steam demand, and the delayed cargo
+has columns yesterday's plan does not cover. So the start served as a repair seed, not as the
+incumbent.

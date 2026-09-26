@@ -263,6 +263,7 @@ void BranchAndBound::run_parallel(bool& unbounded, bool& stopped, bool& gap_clos
   worker_options.threads = 1;
   worker_options.sub_mip_heuristics = false;
   worker_options.debug_solution.clear();
+  worker_options.start.clear();
   std::vector<std::unique_ptr<BranchAndBound>> workers;
   for (int k = 1; k < threads; ++k) {
     workers.push_back(std::make_unique<BranchAndBound>(model_, worker_options, quiet));

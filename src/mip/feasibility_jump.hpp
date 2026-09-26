@@ -19,10 +19,13 @@ struct FeasibilityJumpResult {
 // integer columns. Each step takes a random violated row and moves one of its columns to the
 // value that minimizes the weighted violation of the rows it appears in (a convex piecewise
 // linear function of that value, minimized at a breakpoint); at a local minimum the weights of
-// the violated rows increase. Stops after `max_work` column/row visits or `seconds`.
+// the violated rows increase. Stops after `max_work` column/row visits or `seconds`. The search
+// starts from `start` where it is given and finite (clamped to the bounds, integers rounded),
+// else from the bound nearest 0.
 FeasibilityJumpResult feasibility_jump(const Model& model, Index rows,
                                        const std::vector<double>& lower,
                                        const std::vector<double>& upper, double seconds,
-                                       long long max_work, std::uint64_t seed);
+                                       long long max_work, std::uint64_t seed,
+                                       const std::vector<double>* start = nullptr);
 
 }  // namespace samaya

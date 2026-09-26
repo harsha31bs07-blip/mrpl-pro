@@ -219,6 +219,13 @@ void solve_mip_model(const Model& model, const Params& params, const Logger& log
     options.threads = params.threads > 0
                           ? params.threads
                           : std::max(1, static_cast<int>(std::thread::hardware_concurrency()));
+    if (params.mip_start.size() == static_cast<std::size_t>(model.num_cols())) {
+      if (!params.presolve) {
+        options.start = params.mip_start;
+      } else {
+        for (const Index j : presolve.col_map()) options.start.push_back(params.mip_start[j]);
+      }
+    }
     BranchAndBound search(work, options, log);
     outcome = search.solve();
   }

@@ -32,9 +32,8 @@ constexpr double kMinImprovement = 1e-9;
 // millions of open nodes still finishes within the limit.
 constexpr double kReleaseSecondsPerNode = 2e-6;
 // Rounding followed by an LP over the continuous columns runs at the root and every this many
-// nodes, with this iteration budget.
+// nodes (with search::kRoundAndSolveIterations).
 constexpr long long kRoundAndSolveFrequency = 50;
-constexpr long long kRoundAndSolveIterations = 2000;
 // Primal and dual tolerance of the re-solve that repairs a rounded solution.
 constexpr double kTightPrimalTol = 1e-9;
 // Stored warm-start bases may use at most this many bytes; beyond it nodes start from the root
@@ -56,6 +55,17 @@ constexpr double kCutLoopRootFactor = 5.0;
 constexpr double kCutLoopMinSeconds = 1.0;
 constexpr double kCutLoopTimeFraction = 0.1;
 constexpr double kCutMinTotalGain = 1e-6;
+// Cuts in the tree (fresh separation every MipOptions::tree_separation_frequency depths, the pool
+// at every node). A tree cut must be violated this much (efficacy, as SCIP's
+// separating/minefficacy), a node adds at most kMaxTreeCutsPerNode, and tree cut rounds may take
+// at most kTreeCutTimeFraction of the solve time.
+constexpr double kMinTreeCutEfficacy = 1e-4;
+constexpr int kMaxTreeCutsPerNode = 20;
+constexpr double kTreeCutTimeFraction = 0.1;
+constexpr std::size_t kMaxPoolCuts = 5000;
+// A node's tree cuts stay in the LP only if they close this share of the node's gap.
+constexpr double kTreeCutMinGapShare = 0.01;
+constexpr long long kMaxTreeCutInterval = 10000;
 
 }  // namespace
 
@@ -184,6 +194,14 @@ SimplexStatus BranchAndBound::solve_relaxation(const std::vector<VarStatus>* sta
                                                long long iteration_limit) {
   simplex_->set_iteration_limit(iteration_limit);
   simplex_->set_time_limit(std::max(0.0, remaining_time()));
+  // A basis stored before tree cuts were appended lacks their rows: their logicals are basic.
+  std::vector<VarStatus> padded;
+  const auto total = static_cast<std::size_t>(n_ + m_);
+  if (start != nullptr && !start->empty() && start->size() < total) {
+    padded = *start;
+    padded.resize(total, VarStatus::kBasic);
+    start = &padded;
+  }
   lp_status_ = start != nullptr && !start->empty() ? simplex_->solve(*start) : simplex_->solve();
   outcome_.lp_iterations += simplex_->iterations();
   const std::vector<double>& v = simplex_->values();
@@ -471,7 +489,8 @@ void BranchAndBound::simple_rounding(const std::vector<double>& x) {
 }
 
 bool BranchAndBound::round_and_solve(const std::vector<double>& x,
-                                     const std::vector<VarStatus>& basis) {
+                                     const std::vector<VarStatus>& basis,
+                                     long long iteration_limit) {
   std::vector<std::pair<double, double>> saved;
   saved.reserve(integers_.size());
   for (const Index j : integers_) {
@@ -479,7 +498,7 @@ bool BranchAndBound::round_and_solve(const std::vector<double>& x,
     const double v = std::clamp(std::round(x[j]), lower_[j], upper_[j]);
     set_bound(j, v, v);
   }
-  const SimplexStatus status = solve_relaxation(&basis, kRoundAndSolveIterations);
+  const SimplexStatus status = solve_relaxation(&basis, iteration_limit);
   bool found = status == SimplexStatus::kOptimal && try_solution(x_);
   if (status == SimplexStatus::kOptimal && !found && relaxation_objective() < incumbent_value_) {
     // The scaled tolerance (1e-7) can leave a row violated by more than the acceptance
@@ -489,7 +508,7 @@ bool BranchAndBound::round_and_solve(const std::vector<double>& x,
     tight.dual_tol = kTightPrimalTol;
     tight.perturb = false;
     Simplex exact(lp_, tight, lp_log_);
-    exact.set_iteration_limit(kRoundAndSolveIterations);
+    exact.set_iteration_limit(iteration_limit);
     exact.set_time_limit(std::max(0.0, remaining_time()));
     if (exact.solve(simplex_->status()) == SimplexStatus::kOptimal) {
       outcome_.lp_iterations += exact.iterations();
@@ -535,11 +554,24 @@ void BranchAndBound::remove_rows(const std::vector<Index>& rows) {
   model_.A = SparseMatrix::from_triplets(next, n_, std::move(t));
 }
 
-int BranchAndBound::separate_and_add_cuts() {
-  const std::vector<double> x = x_;
-  const CutContext ctx{model_, At_, lower_, upper_, x, original_rows_};
-  std::vector<Cut> candidates;
+void BranchAndBound::pool_rows(const std::vector<Index>& rows) {
+  const auto start = At_.col_start();
+  const auto index = At_.row_index();
+  const auto val = At_.values();
+  for (const Index i : rows) {
+    if (i < original_rows_ || cut_pool_.size() >= kMaxPoolCuts) continue;
+    Cut cut;
+    for (NnzIndex p = start[i]; p < start[i + 1]; ++p) {
+      cut.index.push_back(index[p]);
+      cut.value.push_back(val[p]);
+    }
+    cut.lower = model_.row_lower[i];
+    cut_pool_.push_back(std::move(cut));
+  }
+}
 
+void BranchAndBound::separate_gomory(const CutContext& ctx, std::vector<Cut>& candidates) {
+  const std::vector<double>& x = ctx.x;
   // Gomory mixed-integer cuts from the rows of fractional basic integer columns, most fractional
   // first. The scaled tableau row is mapped to original units: structural j gets
   // a_j col_k / col_j, the logical of row i a_{n+i} col_k row_i.
@@ -568,9 +600,38 @@ int BranchAndBound::separate_and_add_cuts() {
       candidates.push_back(std::move(cut));
     }
   }
-  separate_mir(ctx, candidates);
-  separate_aggregated_mir(ctx, candidates);
-  separate_knapsack_covers(ctx, candidates);
+}
+
+int BranchAndBound::separate_and_add_cuts(bool tree, bool fresh, int tree_max_cuts) {
+  const std::vector<double> x = x_;
+  const CutContext ctx{model_, At_, tree ? root_lower_ : lower_, tree ? root_upper_ : upper_, x,
+                       original_rows_};
+  std::vector<Cut> candidates;
+  const double min_efficacy = tree ? kMinTreeCutEfficacy : kMinCutEfficacy;
+  const int max_cuts = tree ? tree_max_cuts : options_.max_cuts_per_round;
+  if (tree) {
+    for (std::size_t k = 0; k < cut_pool_.size(); ++k) {
+      const Cut& c = cut_pool_[k];
+      double activity = 0.0;
+      double norm = 0.0;
+      for (std::size_t q = 0; q < c.index.size(); ++q) {
+        activity += c.value[q] * x[c.index[q]];
+        norm += c.value[q] * c.value[q];
+      }
+      const double efficacy = norm > 0.0 ? (c.lower - activity) / std::sqrt(norm) : 0.0;
+      if (efficacy < min_efficacy) continue;
+      Cut candidate = c;
+      candidate.efficacy = efficacy;
+      candidate.pool_index = static_cast<int>(k);
+      candidates.push_back(std::move(candidate));
+    }
+  }
+  if (!tree) separate_gomory(ctx, candidates);
+  if (fresh) {
+    separate_mir(ctx, candidates);
+    separate_aggregated_mir(ctx, candidates);
+    separate_knapsack_covers(ctx, candidates);
+  }
 
   // Select the most efficacious cuts, skipping near-parallel ones.
   for (Cut& c : candidates) {
@@ -610,8 +671,8 @@ int BranchAndBound::separate_and_add_cuts() {
   };
   std::vector<const Cut*> chosen;
   for (const Cut& c : candidates) {
-    if (static_cast<int>(chosen.size()) >= options_.max_cuts_per_round) break;
-    if (c.efficacy < kMinCutEfficacy) break;
+    if (static_cast<int>(chosen.size()) >= max_cuts) break;
+    if (c.efficacy < min_efficacy) break;
     if (std::any_of(chosen.begin(), chosen.end(),
                     [&](const Cut* o) { return cosine(c, *o) > kMaxCutParallelism; })) {
       continue;
@@ -650,7 +711,51 @@ int BranchAndBound::separate_and_add_cuts() {
   }
   model_.row_names.clear();
   model_.A = SparseMatrix::from_triplets(row_id, n_, std::move(t));
+  // Pool cuts now in the LP leave the pool.
+  std::vector<char> taken(cut_pool_.size(), 0);
+  bool any_taken = false;
+  for (const Cut* c : chosen) {
+    if (c->pool_index >= 0) {
+      taken[static_cast<std::size_t>(c->pool_index)] = 1;
+      any_taken = true;
+    }
+  }
+  if (any_taken) {
+    std::size_t next = 0;
+    for (std::size_t k = 0; k < cut_pool_.size(); ++k) {
+      if (!taken[k]) cut_pool_[next++] = std::move(cut_pool_[k]);
+    }
+    cut_pool_.resize(next);
+  }
   return static_cast<int>(chosen.size());
+}
+
+int BranchAndBound::tree_cut_round(int depth) {
+  if (!options_.cuts || !options_.tree_cuts || shared_ != nullptr || depth == 0) return 0;
+  const int room =
+      static_cast<int>(options_.tree_cut_row_fraction * static_cast<double>(original_rows_)) -
+      outcome_.tree_cuts;
+  if (room <= 0) return 0;
+  if (tree_cut_seconds_ > kTreeCutTimeFraction * timer_.seconds()) return 0;
+  if (outcome_.nodes < next_tree_cut_node_) return 0;
+  // Fresh separation also waits after finding nothing (on mas76 it finds nothing at hundreds of
+  // thousands of nodes); the pool check is a few dot products and runs at every node.
+  const bool fresh = options_.tree_separation_frequency > 0 &&
+                     depth % options_.tree_separation_frequency == 0 &&
+                     outcome_.nodes >= next_fresh_node_;
+  if (!fresh && cut_pool_.empty()) return 0;
+  const Timer timer;
+  const int added = separate_and_add_cuts(true, fresh, std::min(kMaxTreeCutsPerNode, room));
+  if (added > 0) {
+    outcome_.tree_cuts += added;
+    outcome_.tree_cuts_separated += added;
+    build_relaxation();
+  } else if (fresh) {
+    fresh_interval_ = std::min(kMaxTreeCutInterval, 2 * fresh_interval_);
+    next_fresh_node_ = outcome_.nodes + fresh_interval_;
+  }
+  tree_cut_seconds_ += timer.seconds();
+  return added;
 }
 
 void BranchAndBound::root_cut_loop() {
@@ -710,6 +815,7 @@ void BranchAndBound::root_cut_loop() {
     basis.resize(static_cast<std::size_t>(n_ + original_rows_));
     std::vector<Index> rows;
     for (Index i = original_rows_; i < m_; ++i) rows.push_back(i);
+    pool_rows(rows);
     remove_rows(rows);
     build_relaxation();
     solve_relaxation(&basis, -1);
@@ -732,6 +838,7 @@ void BranchAndBound::root_cut_loop() {
         if (v >= n_ && drop[v - n_]) continue;
         kept.push_back(basis[v]);
       }
+      pool_rows(slack_rows);
       remove_rows(slack_rows);
       build_relaxation();
       solve_relaxation(&kept, -1);
@@ -872,6 +979,10 @@ BranchAndBound::NodeResult BranchAndBound::process_node(Node& node, std::vector<
     return NodeResult::kPruned;
   }
   std::shared_ptr<const std::vector<VarStatus>> start = node.basis;
+  bool cuts_tried = false;
+  double before_cuts = kInf;  // The objective before this node's cut round, until re-solved.
+  int cut_rows_added = 0;
+  std::shared_ptr<const std::vector<VarStatus>> pre_cut_basis;
   for (int round = 0;; ++round) {
     const std::vector<VarStatus>* start_basis =
         start ? start.get() : (root_basis_.empty() ? nullptr : &root_basis_);
@@ -887,6 +998,33 @@ BranchAndBound::NodeResult BranchAndBound::process_node(Node& node, std::vector<
       case SimplexStatus::kNumericalError: return NodeResult::kFailed;
     }
     const double objective = relaxation_objective();
+    if (std::isfinite(before_cuts)) {
+      // The node's cut round: keep its rows only if they closed enough of the node's gap (or, with
+      // no incumbent, moved the bound as a root round must). They are the LP's last rows and no
+      // stored basis covers them yet, so removing them restores the previous LP exactly.
+      const double gain = objective - before_cuts;
+      const bool has_gap = cutoff() < kInf;
+      const double needed = has_gap ? kTreeCutMinGapShare * (cutoff() - before_cuts)
+                                    : kCutStallImprovement * std::max(1.0, std::fabs(before_cuts));
+      ++tree_cut_rounds_;
+      before_cuts = kInf;
+      if (gain < needed && effective_bound(objective) < cutoff()) {
+        const Timer undo_timer;
+        std::vector<Index> rows;
+        for (Index i = m_ - cut_rows_added; i < m_; ++i) rows.push_back(i);
+        remove_rows(rows);
+        build_relaxation();
+        outcome_.tree_cuts -= cut_rows_added;
+        tree_cut_seconds_ += undo_timer.seconds();
+        tree_cut_interval_ = std::min(kMaxTreeCutInterval, 2 * tree_cut_interval_);
+        next_tree_cut_node_ = outcome_.nodes + tree_cut_interval_;
+        start = std::move(pre_cut_basis);
+        continue;
+      }
+      ++tree_cut_kept_rounds_;
+      tree_cut_interval_ = 1;
+      fresh_interval_ = 1;
+    }
     if (round == 0 && node.branch_col >= 0) {
       record_pseudocost(node.branch_col, node.branch_up, objective - node.bound,
                         node.branch_distance);
@@ -916,7 +1054,9 @@ BranchAndBound::NodeResult BranchAndBound::process_node(Node& node, std::vector<
       // fixed. If that fails, branch on the columns that are not exactly integral (x <= k or
       // x >= k + 1 is a valid split at any value); only an exactly integral point that still
       // fails leaves the node unresolved.
-      if (round_and_solve(x, *basis) || bound >= cutoff()) return NodeResult::kPruned;
+      if (round_and_solve(x, *basis, search::kRoundAndSolveIterations) || bound >= cutoff()) {
+        return NodeResult::kPruned;
+      }
       for (const Index j : integers_) {
         // Both children must be strictly smaller: a value just outside a bound (within the LP
         // tolerance) gives no split.
@@ -944,7 +1084,7 @@ BranchAndBound::NodeResult BranchAndBound::process_node(Node& node, std::vector<
 
     simple_rounding(x);
     if (node.depth == 0 || outcome_.nodes % kRoundAndSolveFrequency == 0) {
-      round_and_solve(x, *basis);
+      round_and_solve(x, *basis, search::kRoundAndSolveIterations);
     }
     if (options_.heuristics && round == 0) run_heuristics(node, x, *basis);
     if (bound >= cutoff()) {
@@ -957,6 +1097,20 @@ BranchAndBound::NodeResult BranchAndBound::process_node(Node& node, std::vector<
       for (const Index j : integers_) fixed += lower_[j] == upper_[j];
       log_.log(1, "MIP root: %zu of %zu integers fixed, %lld reduced-cost fixings", fixed,
                integers_.size(), outcome_.reduced_cost_fixings);
+    }
+
+    if (!cuts_tried) {
+      cuts_tried = true;
+      const int added = tree_cut_round(node.depth);
+      if (added > 0) {
+        before_cuts = objective;
+        cut_rows_added = added;
+        pre_cut_basis = basis;
+        auto padded = std::make_shared<std::vector<VarStatus>>(*basis);
+        padded->resize(static_cast<std::size_t>(n_ + m_), VarStatus::kBasic);
+        start = std::move(padded);
+        continue;
+      }
     }
 
     bool infeasible = false;
@@ -1036,6 +1190,7 @@ MipOutcome BranchAndBound::restart() {
       options.node_limit = std::max(0LL, options.node_limit - outcome_.nodes);
     }
     options.debug_solution.clear();
+    options.start.clear();  // The incumbent below already carries whatever the start gave.
     options.objective_cutoff.reset();
     if (incumbent_value_ < kInf) options.objective_cutoff = sense_ * incumbent_value_;
     BranchAndBound search(presolve.reduced(), options, log_);
@@ -1127,7 +1282,8 @@ MipOutcome BranchAndBound::solve() {
   }
   for (const Index j : touched_) is_touched_[j] = 0;
   touched_.clear();
-  if (options_.heuristics && !integers_.empty()) run_feasibility_jump();
+  const bool started = !options_.start.empty() && use_start();
+  if (options_.heuristics && !integers_.empty() && !started) run_feasibility_jump();
   root_cut_loop();
 
   std::optional<Node> current = Node{};
@@ -1246,6 +1402,11 @@ MipOutcome BranchAndBound::solve() {
     }
   }
 
+  if (tree_cut_rounds_ > 0) {
+    log_.log(1, "MIP tree cuts: %d kept from %lld of %lld rounds, %zu left in the pool, %.2f s",
+             outcome_.tree_cuts, tree_cut_kept_rounds_, tree_cut_rounds_, cut_pool_.size(),
+             tree_cut_seconds_);
+  }
   // Final status and bound (minimization internally).
   double bound = kInf;
   if (unbounded) {

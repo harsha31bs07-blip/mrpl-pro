@@ -84,6 +84,7 @@ above, which ignores such instances.
 | + restart after the root (20% of integers fixed) | 46 | 10.0% | 7 | 0 |
 | + plunge into the child with the smaller pseudocost estimate | 48 | 9.7% | 7 | 0 |
 | + Feasibility Jump, dive step limit (same-day rerun of the previous build: 46, 12.3%, 7) | 51 | 10.2% | 7 | 0 |
+| + cuts in the tree (pool + fresh c-MIR/covers), MIP start | 51 | see below | 7 | 0 |
 
 **Done:**
 - **A1:** runs end within the time limit (the node release time is reserved).
@@ -100,6 +101,22 @@ above, which ignores such instances.
 - **A dive fix it exposed:** a dive could repeat a step on a column already within the tolerance
   of its integral bound, without an LP iteration, until the time limit (neos-2657525-crna). The
   column is now snapped, and every step counts against the dive budget.
+- **Cuts in the tree:**
+  - Root cuts that end up non-binding go to a pool; nodes add the pool cuts their LP point
+    violates.
+  - Every 10th depth separates fresh c-MIR and cover cuts with the root bounds (so they are valid
+    everywhere; Gomory cuts stay at the root, their tableau rows are only locally valid).
+  - A node keeps its cuts only if they close 1% of its gap. They are the LP's last rows, so
+    removing them restores the LP exactly.
+  - Kept cuts may grow the LP by at most 25% of its rows.
+  - The metric for cuts is the proven bound, not the incumbent: the screening's median primal
+    gap moved by up to 5 points between two runs of the same binary.
+  - Bound A/B, both builds at the same time, 60 s: the bound improved on 23 instances and got
+    worse on 9. The mean distance of the bound from the optimum went from 22.4% to 22.0% (the
+    median from 8.1% to 8.3%). Solved 7 and 7, same shifted geomean.
+  - Largest gains: neos17 21.0% -> 8.5%, enlight_hard 16.2% -> 10.8%, binkar10_1 0.32% ->
+    0.03%. Largest loss: neos-911970 5.5% -> 8.4% (the kept cuts slow its node LPs).
+- **MIP start (`--mip-start`, `Params::mip_start`):** see `cases/README.md`, re-planning.
 
 **Next, from the per-instance analysis** ([results/comparison.md](results/comparison.md)):
 - neos-3381206-awhea now has a solution (Feasibility Jump) but its bound is stuck at 416 with no

@@ -9,6 +9,7 @@
 #include "core/log.hpp"
 #include "linalg/scaling.hpp"
 #include "lp/simplex.hpp"
+#include "mip/cuts.hpp"
 #include "samaya/model.hpp"
 #include "samaya/status.hpp"
 
@@ -35,6 +36,16 @@ struct MipOptions {
   bool cuts = true;
   int max_cut_rounds = 20;
   int max_cuts_per_round = 200;
+  // Cuts in the tree: pool cuts violated at a node, and fresh c-MIR and cover cuts separated with
+  // the root bounds (so valid everywhere) at every tree_separation_frequency-th depth; a node's
+  // cuts stay only if they close enough of its gap. Sequential search only: node bases then keep
+  // one row layout. SCIP's default frequency for these separators is 10.
+  bool tree_cuts = true;
+  int tree_separation_frequency = 10;
+  // Kept tree cuts stay in every later node LP, so they may grow the LP by at most this share of
+  // its rows: a node LP's cost grows about linearly with the rows, and on small models
+  // (markshare_4_0: 6 rows) node throughput is what solves them.
+  double tree_cut_row_fraction = 0.25;
   // Primal heuristics: feasibility pump, diving, and the RENS/RINS sub-MIPs (solved by a nested
   // search on a presolved copy; a nested search never starts sub-MIPs itself).
   bool heuristics = true;
@@ -49,6 +60,11 @@ struct MipOptions {
   // Restart once after the root when it fixed a large share of the integer columns.
   bool restart = true;
   bool sub_mip_heuristics = true;
+  // A known point in the model's columns, e.g. the previous plan when re-planning; NaN marks an
+  // unknown value. It becomes the incumbent if it is feasible; otherwise its integer values are
+  // fixed and the continuous columns re-solved; otherwise it is Feasibility Jump's starting point,
+  // which repairs it.
+  std::vector<double> start;
   // Only solutions strictly better than this objective (in the model's sense) are accepted; the
   // search prunes against it as if it were an incumbent. Used by the sub-MIPs.
   std::optional<double> objective_cutoff;
@@ -77,6 +93,8 @@ struct MipOutcome {
   bool restarted = false;              // The search restarted after the root.
   int cut_rounds = 0;
   int cuts_added = 0;             // Cuts in the LP after the root (non-binding ones removed).
+  int tree_cuts = 0;              // Tree cuts kept in the LP (pool and fresh).
+  long long tree_cuts_separated = 0;  // Tree cuts appended, including those removed again.
   double root_bound = -kInf;      // Root LP bound before and after cuts, in the model's sense.
   double root_bound_cuts = -kInf;
   long long debug_cut_violations = 0;
@@ -166,7 +184,16 @@ class BranchAndBound {
 
   // Cuts.
   void root_cut_loop();
-  int separate_and_add_cuts();
+  // Separates cuts at the LP point x_ and appends the selected ones as rows. At the root (tree
+  // false) with the current bounds, Gomory cuts included. In the tree with the root bounds,
+  // without Gomory cuts (their tableau rows are only locally valid), plus violated pool cuts,
+  // at most tree_max_cuts; fresh separation only if `fresh`.
+  int separate_and_add_cuts(bool tree = false, bool fresh = true, int tree_max_cuts = 0);
+  // Gomory mixed-integer cuts from the current LP's tableau rows (valid under ctx's bounds).
+  void separate_gomory(const CutContext& ctx, std::vector<Cut>& candidates);
+  // Adds tree cuts at the current node when allowed; returns the number of rows appended.
+  int tree_cut_round(int depth);
+  void pool_rows(const std::vector<Index>& rows);
   void remove_rows(const std::vector<Index>& rows);
 
   // Search.
@@ -194,7 +221,10 @@ class BranchAndBound {
   void simple_rounding(const std::vector<double>& x);
   // Fixes the integers at their rounded values and re-solves the continuous columns; true if
   // that gave a new incumbent.
-  bool round_and_solve(const std::vector<double>& x, const std::vector<VarStatus>& basis);
+  bool round_and_solve(const std::vector<double>& x, const std::vector<VarStatus>& basis,
+                       long long iteration_limit);
+  // Uses options_.start (see MipOptions::start); returns true if it gave an incumbent.
+  bool use_start();
 
   Model model_;  // Own copy: cuts are appended as rows.
   MipOptions options_;
@@ -226,6 +256,20 @@ class BranchAndBound {
   std::vector<Index> touched_;
   std::vector<char> is_touched_;
   std::vector<VarStatus> root_basis_;
+  // Globally valid cuts not in the LP: root cuts that ended up non-binding. Tree nodes add the ones
+  // their LP point violates.
+  std::vector<Cut> cut_pool_;
+  double tree_cut_seconds_ = 0.0;
+  // Tree cut rounds so far, and those whose cuts stayed in the LP.
+  long long tree_cut_rounds_ = 0;
+  long long tree_cut_kept_rounds_ = 0;
+  // Rounds whose cuts were removed back off: the next round waits this many nodes, doubling after
+  // each failure, back to 1 after a success. Fresh separation that finds nothing backs off the
+  // same way on its own interval.
+  long long next_tree_cut_node_ = 0;
+  long long tree_cut_interval_ = 1;
+  long long next_fresh_node_ = 0;
+  long long fresh_interval_ = 1;
 
   std::vector<char> row_mark_;  // Propagation queue membership.
 

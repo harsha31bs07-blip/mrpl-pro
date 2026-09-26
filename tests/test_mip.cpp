@@ -257,6 +257,39 @@ Model fixed_charge(std::mt19937& rng) {
   return model;
 }
 
+// Multi-dimensional knapsack over 16-22 binaries and 2-4 rows with correlated weights: small
+// enough for the reference search, deep enough that the search branches past the root.
+Model multi_knapsack(std::mt19937& rng) {
+  const auto uniform_int = [&](int lo, int hi) {
+    return std::uniform_int_distribution<int>(lo, hi)(rng);
+  };
+  const int n = uniform_int(16, 22);
+  const int m = uniform_int(2, 4);
+  Model model;
+  model.sense = samaya::ObjSense::kMaximize;
+  std::vector<samaya::Triplet> t;
+  std::vector<double> total(static_cast<std::size_t>(m), 0.0);
+  for (int j = 0; j < n; ++j) {
+    double value = 0.0;
+    for (int i = 0; i < m; ++i) {
+      const int w = uniform_int(10, 60);
+      t.push_back({i, j, static_cast<double>(w)});
+      total[static_cast<std::size_t>(i)] += w;
+      value += w;
+    }
+    model.obj.push_back(value / m + uniform_int(-5, 5));
+    model.col_lower.push_back(0);
+    model.col_upper.push_back(1);
+    model.col_type.push_back(samaya::VarType::kInteger);
+  }
+  for (int i = 0; i < m; ++i) {
+    model.row_lower.push_back(-kInf);
+    model.row_upper.push_back(std::floor(0.5 * total[static_cast<std::size_t>(i)]));
+  }
+  model.A = samaya::SparseMatrix::from_triplets(m, n, std::move(t));
+  return model;
+}
+
 // Fixed-charge network flow with big-M arcs (x_a <= M y_a, M = total supply), as in p200x1188c
 // and mc11: flow conservation rows over continuous flows only, so c-MIR finds nothing and the
 // root gap needs flow covers.
@@ -518,6 +551,103 @@ TEST(mip_cuts_on_fixed_charge_models) {
   CHECK_EQ(violations, 0);
   CHECK(models > 100);
   CHECK(tightened > models / 2);
+}
+
+TEST(mip_tree_cuts_never_separate_an_optimal_solution) {
+  // Tree cuts are separated with the root bounds so they hold at every node; one derived with a
+  // node's own bounds could cut off the optimum elsewhere. Separating at every node (with room for
+  // as many cuts as rows) on the random and fixed-charge families, no cut may separate a known
+  // optimal solution, whether it stays in the LP or is removed again, and the optimum must match
+  // the reference.
+  const samaya::Logger quiet(0);
+  long long violations = 0;
+  long long separated = 0;
+  long long kept = 0;
+  int models = 0;
+  int with_tree_cuts = 0;
+  std::mt19937 rng(131);
+  for (int k = 0; k < 200; ++k) {
+    Model model;
+    switch (k % 4) {
+      case 0: model = random_milp(MilpFamily::kMixed, rng); break;
+      case 1: model = multi_knapsack(rng); break;
+      case 2: model = fixed_charge(rng); break;
+      default: model = big_m_network(rng); break;
+    }
+    const ReferenceMilpResult ref = samaya::test::reference_milp(model);
+    if (ref.status != ReferenceMilpResult::Status::kOptimal) continue;
+    samaya::MipOptions options;
+    options.rel_gap = 0.0;
+    options.abs_gap = 1e-9;
+    options.probing = false;
+    options.restart = false;
+    options.tree_separation_frequency = 1;
+    options.tree_cut_row_fraction = 1.0;
+    options.debug_solution = ref.x;
+    const samaya::MipOutcome out = samaya::BranchAndBound(model, options, quiet).solve();
+    ++models;
+    violations += out.debug_cut_violations;
+    separated += out.tree_cuts_separated;
+    kept += out.tree_cuts;
+    with_tree_cuts += out.tree_cuts_separated > 0;
+    CHECK(out.status == Status::kOptimal);
+    CHECK(std::fabs(out.objective - ref.objective) <= 1e-6 * (1 + std::fabs(ref.objective)));
+  }
+  std::printf("  %d models, %d with tree cuts (%lld separated, %lld kept), %lld violations\n",
+              models, with_tree_cuts, separated, kept, violations);
+  CHECK_EQ(violations, 0);
+  CHECK(models > 150);
+  CHECK(with_tree_cuts > 30);
+}
+
+TEST(mip_start_becomes_the_incumbent_or_is_completed) {
+  // With heuristics off and no nodes, a solution can only come from the start. A feasible start
+  // (the reference optimum) must be taken exactly as it is; with the continuous values removed
+  // (NaN) the integer values must be kept and the continuous columns re-solved, which gives the
+  // optimum again. A start outside the bounds must be ignored safely.
+  const samaya::Logger quiet(0);
+  std::mt19937 rng(151);
+  int models = 0;
+  int taken = 0;
+  int completed = 0;
+  for (int k = 0; k < 200; ++k) {
+    const Model model = k % 2 == 0 ? random_milp(MilpFamily::kMixed, rng) : fixed_charge(rng);
+    const ReferenceMilpResult ref = samaya::test::reference_milp(model);
+    if (ref.status != ReferenceMilpResult::Status::kOptimal) continue;
+    ++models;
+    const double tol = 1e-6 * (1.0 + std::fabs(ref.objective));
+    samaya::MipOptions options;
+    options.heuristics = false;
+    options.node_limit = 0;
+    options.start = ref.x;
+    samaya::MipOutcome out = samaya::BranchAndBound(model, options, quiet).solve();
+    // Taken as it is (the plan does not move), not merely matched in objective by a re-solve.
+    bool same = !out.x.empty();
+    for (Index j = 0; same && j < model.num_cols(); ++j) {
+      const bool integer = model.col_type[j] == samaya::VarType::kInteger;
+      same = out.x[j] == (integer ? std::round(ref.x[j]) : ref.x[j]);
+    }
+    if (same) ++taken;
+
+    for (Index j = 0; j < model.num_cols(); ++j) {
+      if (model.col_type[j] == samaya::VarType::kContinuous) options.start[j] = std::nan("");
+    }
+    out = samaya::BranchAndBound(model, options, quiet).solve();
+    // (Without continuous columns this is the same start as above.)
+    if (!out.x.empty() && std::fabs(out.objective - ref.objective) <= tol) ++completed;
+
+    options.start.assign(static_cast<std::size_t>(model.num_cols()), 1e9);
+    options.node_limit = -1;
+    options.heuristics = true;
+    out = samaya::BranchAndBound(model, options, quiet).solve();
+    CHECK(out.status == Status::kOptimal);
+    CHECK(std::fabs(out.objective - ref.objective) <= tol);
+  }
+  std::printf("  %d models: start taken %d, completed from its integers %d\n", models, taken,
+              completed);
+  CHECK(models > 100);
+  CHECK_EQ(taken, models);
+  CHECK_EQ(completed, models);
 }
 
 TEST(mip_parallel_search_matches_reference) {

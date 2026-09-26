@@ -216,7 +216,8 @@ def plan(crudes: int, periods: int, rng: random.Random) -> MpsWriter:
 # Crude receipt scheduling (MILP)
 
 
-def crude(cargoes: int, days: int, rng: random.Random) -> MpsWriter:
+def crude(cargoes: int, days: int, rng: random.Random,
+          update: random.Random | None = None) -> MpsWriter:
     lp = MpsWriter(f"MRPL_CRUDE_{cargoes}k_{days}d", maximize=True)
     slate = CRUDES[:6]
     cdu_min, cdu_max = 36.0, 45.0
@@ -233,6 +234,14 @@ def crude(cargoes: int, days: int, rng: random.Random) -> MpsWriter:
         early = rng.randint(0, max(0, days - 4))
         late = min(days - 1, early + rng.randint(2, 4))
         plan_cargo.append((k, name, size, early, late))
+    if update is not None:
+        # Re-plan the next day: opening stocks as measured (within 5% of the forecast) and one
+        # term cargo reporting a delay of one or two days.
+        initial = {n: v * update.uniform(0.95, 1.05) for n, v in initial.items()}
+        k = update.randrange(cargoes)
+        _, name, size, early, late = plan_cargo[k]
+        slip = update.randint(1, 2)
+        plan_cargo[k] = (k, name, size, min(days - 1, early + slip), min(days - 1, late + slip))
     for k, name, size, early, late in plan_cargo:
         for t in range(early, late + 1):
             # Demurrage after the first two days of the window.
@@ -290,7 +299,8 @@ def crude(cargoes: int, days: int, rng: random.Random) -> MpsWriter:
 # Utility unit commitment (MILP)
 
 
-def utility(hours: int, rng: random.Random) -> MpsWriter:
+def utility(hours: int, rng: random.Random,
+            update: random.Random | None = None) -> MpsWriter:
     lp = MpsWriter(f"MRPL_UTILITY_{hours}h")
     # name: max HP steam (t/h), min load fraction, fuel cost per t steam (lakh Rs), no-load cost
     # per hour, startup cost, min up hours.
@@ -308,6 +318,11 @@ def utility(hours: int, rng: random.Random) -> MpsWriter:
         power = 62.0 * daily * rng.uniform(0.97, 1.03)
         hp = 110.0 * daily * rng.uniform(0.95, 1.05)
         mp = 210.0 * daily * rng.uniform(0.95, 1.05)
+        if update is not None:
+            # Re-plan with the revised demand forecast (each hour within 5% of yesterday's).
+            power *= update.uniform(0.95, 1.05)
+            hp *= update.uniform(0.95, 1.05)
+            mp *= update.uniform(0.95, 1.05)
         for name, cap, mn, fuel, noload, start, _ in boilers:
             lp.col(f"{name}_on_{h}", cost=noload, up=1, integer=True)
             lp.col(f"{name}_start_{h}", cost=start, up=1, integer=True)
@@ -371,13 +386,17 @@ SIZES = {
 BUILDERS = {"plan": plan, "crude": crude, "utility": utility}
 
 
-def generate(out: Path, seed: int) -> None:
+def generate(out: Path, seed: int, update: int | None = None) -> None:
     out.mkdir(parents=True, exist_ok=True)
     for family, sizes in SIZES.items():
+        if update is not None and family == "plan":
+            continue  # Re-planning variants exist for the scheduling MILPs only.
         for size, args in sizes:
             rng = random.Random(f"{seed}-{family}-{size}")
-            model = BUILDERS[family](*args, rng)
-            path = out / f"mrpl_{family}_{size}.mps"
+            extra = [] if update is None else [random.Random(f"{update}-{family}-{size}")]
+            model = BUILDERS[family](*args, rng, *extra)
+            suffix = "" if update is None else f"_update{update}"
+            path = out / f"mrpl_{family}_{size}{suffix}.mps"
             model.write(path)
             n_int = len(model.integer)
             print(f"{path}: {len(model.rows)} rows, {len(model.cols)} columns ({n_int} integer)")
@@ -474,12 +493,17 @@ def main() -> None:
     g = sub.add_parser("generate")
     g.add_argument("--out", type=Path, default=Path(__file__).parent / "instances")
     g.add_argument("--seed", type=int, default=26119)
+    g.add_argument("--update", type=int, default=None,
+                   help="also write re-planning variants (same plant, revised data) with this "
+                        "seed, named *_update<seed>.mps")
     r = sub.add_parser("report")
     r.add_argument("model", type=Path)
     r.add_argument("solution", type=Path)
     args = parser.parse_args()
     if args.command == "generate":
         generate(args.out, args.seed)
+        if args.update is not None:
+            generate(args.out, args.seed, args.update)
     else:
         report(args.model, args.solution)
 

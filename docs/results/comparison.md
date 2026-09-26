@@ -83,3 +83,47 @@ Solve times of every instance samaya solves (seconds; "–" = not solved in 60 s
 
 After this run, the child-selection change (90f8df0) raised samaya's screening to 48 feasible
 (from 46) at the same 7 solved. The next same-machine comparison will include it.
+
+## Verified results: what samaya checks, and what the others do
+
+Every answer samaya reports is checked by `src/verify/`, an independent checker that shares no
+code with the solvers and recomputes everything from the original model (before presolve) in
+`long double`. It is on by default, and the JSON output carries the outcome (`verified`,
+`max_primal_violation`, `max_dual_violation`).
+
+| Claim | Evidence checked |
+|---|---|
+| LP optimal | Primal feasibility, and dual feasibility of the reduced costs d = c − Aᵀy recomputed from the returned duals (with the objective sense) |
+| LP infeasible | A Farkas certificate: the returned row multipliers must prove that no point satisfies the rows and bounds |
+| LP unbounded | A ray: it improves the objective and never violates a finite bound or row |
+| MILP solution | Bounds, rows and integrality of the returned point on the original model; the objective is recomputed |
+
+If an LP answer fails the check, samaya re-solves with tighter tolerances and then without
+scaling. An answer that still fails is reported as `numerical_error`, never as a result, and
+the checker's tolerances are never loosened to make it pass.
+
+**What this does not cover:** the MILP bound. "Optimal" for a MILP means the search closed the
+gap to 1e-4, and nothing re-checks that the pruned subtrees held nothing better.
+
+**What the other solvers do:**
+- **HiGHS** reports its own primal violations (number, sum and maximum) and corrects the model
+  status when a claimed optimum breaks its tolerances. That check runs inside the solver.
+- **SCIP 10** added an exact rational mode that writes VIPR certificates. An independent tool
+  checks these, including the MILP bound, which makes it the strongest guarantee of the four.
+  It is optional, and 7–10× slower than SCIP's default settings, per the SCIP 10 report.
+- **CBC and GLPK** check their own solutions.
+
+Mature solvers still ship wrong answers now and then. HiGHS examples:
+- [ERGO-Code/HiGHS#3273](https://github.com/ERGO-Code/HiGHS/issues/3273): HiGHS 1.15.1 cut off
+  the optimal solution with presolve off (faulty conflict analysis). Opened September 2026,
+  fixed.
+- [ERGO-Code/HiGHS#1710](https://github.com/ERGO-Code/HiGHS/issues/1710): HiGHS 1.7.0 reported
+  an infeasible MILP as optimal with presolve on.
+
+samaya's verifier would not have caught the first: it is a bound error. It would have caught
+the second: the returned point fails the row check.
+
+**The honest claim:** every samaya result is checked by default, at the cost of one pass over the
+matrix, against certificates for everything except the MILP bound. The benchmark harness then
+cross-checks every final answer against the other solvers' and against the MIPLIB reference
+values. There has been no disagreement in the runs reported here.

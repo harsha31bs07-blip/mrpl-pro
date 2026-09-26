@@ -25,7 +25,8 @@ constexpr long long kClockInterval = 256;
 FeasibilityJumpResult feasibility_jump(const Model& model, Index rows,
                                        const std::vector<double>& lower,
                                        const std::vector<double>& upper, double seconds,
-                                       long long max_work, std::uint64_t seed) {
+                                       long long max_work, std::uint64_t seed,
+                                       const std::vector<double>* start) {
   FeasibilityJumpResult result;
   const Index n = model.num_cols();
   const SparseMatrix at = model.A.transpose();
@@ -38,7 +39,14 @@ FeasibilityJumpResult feasibility_jump(const Model& model, Index rows,
   std::mt19937_64 rng(seed);
 
   std::vector<double> x(static_cast<std::size_t>(n));
+  const bool has_start = start != nullptr && start->size() == static_cast<std::size_t>(n);
   for (Index j = 0; j < n; ++j) {
+    if (has_start && std::isfinite((*start)[j])) {
+      double v = (*start)[j];
+      if (model.col_type[j] == VarType::kInteger) v = std::round(v);
+      x[j] = std::clamp(v, lower[j], upper[j]);
+      continue;
+    }
     double v = std::clamp(0.0, lower[j], upper[j]);
     if (model.col_type[j] == VarType::kInteger) v = std::ceil(v - 1e-9);
     x[j] = std::clamp(v, lower[j], upper[j]);

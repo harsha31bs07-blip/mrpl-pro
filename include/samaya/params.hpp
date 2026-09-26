@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "samaya/types.hpp"
 
@@ -36,6 +37,11 @@ struct Params {
 
   // Independently re-check every solution before reporting it.
   bool verify = true;
+
+  // MILP start, one value per column of the model (NaN = unknown), e.g. the previous plan when
+  // re-planning. Used as the incumbent if feasible, else completed or repaired (see
+  // MipOptions::start).
+  std::vector<double> mip_start;
 
   // 0 = silent, 1 = summary, 2 = iteration log, 3 = debug.
   int log_level = 1;

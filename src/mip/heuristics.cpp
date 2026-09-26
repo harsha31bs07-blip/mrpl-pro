@@ -8,6 +8,7 @@
 
 #include "mip/branch_and_bound.hpp"
 #include "mip/feasibility_jump.hpp"
+#include "mip/search_constants.hpp"
 #include "presolve/presolve.hpp"
 
 namespace samaya {
@@ -56,6 +57,28 @@ constexpr double kScoreFloorDive = 1e-6;
 
 // Feasibility Jump before the root LP (as in HiGHS and Xpress): LP-free, so it can find a first
 // solution where the LP-based heuristics do not (general integers, equality-heavy models).
+bool BranchAndBound::use_start() {
+  const std::vector<double>& start = options_.start;
+  if (start.size() != static_cast<std::size_t>(n_)) {
+    log_.log(1, "MIP start: ignored (%zu values for %d columns)", start.size(), n_);
+    return false;
+  }
+  const auto known = [](double v) { return std::isfinite(v); };
+  const int before = outcome_.heuristic_solutions;
+  const char* how = nullptr;
+  if (std::all_of(start.begin(), start.end(), known) && try_solution(start)) {
+    ++outcome_.heuristic_solutions;
+    how = "feasible, taken as the incumbent";
+  } else if (std::all_of(integers_.begin(), integers_.end(),
+                         [&](Index j) { return known(start[j]); })) {
+    // The integer decisions are kept and the continuous columns re-solved for today's data. The
+    // LP starts cold, so it gets no iteration limit.
+    if (round_and_solve(start, {}, -1)) how = "integers kept, continuous columns re-solved";
+  }
+  log_.log(1, "MIP start: %s", how != nullptr ? how : "not feasible, repaired from it");
+  return outcome_.heuristic_solutions > before;
+}
+
 void BranchAndBound::run_feasibility_jump() {
   double seconds = kJumpMaxSeconds;
   if (std::isfinite(options_.time_limit)) {
@@ -66,7 +89,8 @@ void BranchAndBound::run_feasibility_jump() {
                     kJumpMinWork;
   const Timer timer;
   const FeasibilityJumpResult jump =
-      feasibility_jump(model_, original_rows_, lower_, upper_, seconds, work, 12345u);
+      feasibility_jump(model_, original_rows_, lower_, upper_, seconds, work, 12345u,
+                       options_.start.empty() ? nullptr : &options_.start);
   const bool improved = jump.found && try_solution(jump.x);
   if (improved) {
     ++outcome_.heuristic_solutions;
@@ -201,7 +225,8 @@ void BranchAndBound::dive(DiveRule rule, const std::vector<double>& x0,
       if (try_solution(x)) {
         ++outcome_.heuristic_solutions;
       } else {
-        round_and_solve(x, basis);  // Integral within the tolerance but not exactly.
+        // Integral within the tolerance but not exactly.
+        round_and_solve(x, basis, search::kRoundAndSolveIterations);
       }
       break;
     }
@@ -334,7 +359,7 @@ void BranchAndBound::feasibility_pump(const std::vector<double>& x0,
   log_.log(2, "mip: feasibility pump %s after %lld LP iterations", found ? "succeeded" : "failed",
            outcome_.lp_iterations - start);
   // The last point's rounding with the continuous columns re-optimized.
-  if (!found && !time_up()) round_and_solve(x, basis);
+  if (!found && !time_up()) round_and_solve(x, basis, search::kRoundAndSolveIterations);
 }
 
 void BranchAndBound::rens(const std::vector<double>& x) {
@@ -401,6 +426,7 @@ void BranchAndBound::sub_mip(const std::vector<double>& lower, const std::vector
     options.sub_mip_heuristics = false;
     options.threads = 1;
     options.debug_solution.clear();
+    options.start.clear();
     options.objective_cutoff.reset();
     if (!incumbent_.empty()) options.objective_cutoff = sense_ * cutoff();
     BranchAndBound search(reduced, options, lp_log_);

@@ -13,6 +13,7 @@ struct Cut {
   std::vector<double> value;
   double lower = 0.0;
   double efficacy = 0.0;  // Violation by the LP point divided by the coefficient norm.
+  int pool_index = -1;    // Position in the search's cut pool when taken from there.
 };
 
 // What the separators see: the model's rows (including earlier cuts), the column bounds in

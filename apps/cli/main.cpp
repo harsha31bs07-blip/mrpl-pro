@@ -12,8 +12,11 @@
 #include <exception>
 #include <fstream>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <string_view>
+#include <unordered_map>
+#include <vector>
 
 #include "samaya.hpp"
 
@@ -31,6 +34,8 @@ void print_usage(std::FILE* out) {
                "  --stats               Print model statistics and exit without solving\n"
                "  --json                Print a JSON run summary as the last line of output\n"
                "  --solution <file>     Write status, objective, primal and dual values to a file\n"
+               "  --mip-start <file>    Start a MILP from a solution file written by --solution\n"
+               "                        (columns matched by name; e.g. yesterday's plan)\n"
                "  --time-limit <sec>    Wall-clock time limit\n"
                "  --threads <n>         Worker threads (0 = all cores)\n"
                "  --mip-gap <gap>       Relative MIP gap tolerance\n"
@@ -127,6 +132,42 @@ bool write_solution(const std::string& file, const samaya::Model& model,
   return static_cast<bool>(out);
 }
 
+// Reads the column values of a --solution file into one value per model column, matched by name
+// (NaN where the file has no value). Returns the number of columns matched, or -1 if the file
+// cannot be read.
+int read_mip_start(const std::string& file, const samaya::Model& model,
+                   std::vector<double>& start) {
+  std::ifstream in(file);
+  if (!in) return -1;
+  std::unordered_map<std::string, samaya::Index> index;
+  for (samaya::Index j = 0; j < model.num_cols(); ++j) {
+    index.emplace(model.col_names.empty() ? "c" + std::to_string(j) : model.col_names[j], j);
+  }
+  start.assign(static_cast<std::size_t>(model.num_cols()), std::nan(""));
+  int matched = 0;
+  std::string line;
+  bool in_columns = false;
+  while (std::getline(in, line)) {
+    if (line.rfind("columns ", 0) == 0) {
+      in_columns = true;
+      continue;
+    }
+    if (!in_columns || line.empty() || line.front() == '#') {
+      if (in_columns && line.empty()) break;
+      continue;
+    }
+    std::istringstream fields(line);
+    std::string name;
+    double value = 0.0;
+    if (!(fields >> name >> value)) continue;
+    const auto it = index.find(name);
+    if (it == index.end()) continue;
+    start[static_cast<std::size_t>(it->second)] = value;
+    ++matched;
+  }
+  return matched;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -135,6 +176,7 @@ int main(int argc, char** argv) {
   bool json = false;
   std::string path;
   std::string solution_path;
+  std::string start_path;
 
   for (int i = 1; i < argc; ++i) {
     const std::string_view arg = argv[i];
@@ -168,6 +210,8 @@ int main(int argc, char** argv) {
       json = true;
     } else if (arg == "--solution") {
       solution_path = next_value("--solution");
+    } else if (arg == "--mip-start") {
+      start_path = next_value("--mip-start");
     } else if (arg == "--time-limit") {
       params.time_limit = next_number("--time-limit");
     } else if (arg == "--threads") {
@@ -222,6 +266,18 @@ int main(int argc, char** argv) {
     samaya::print_stats(std::cout, model, stats);
     std::cout << "Read time " << read_seconds << " s\n";
     std::cout.flush();
+  }
+
+  if (!start_path.empty()) {
+    const int matched = read_mip_start(start_path, model, params.mip_start);
+    if (matched < 0) {
+      std::fprintf(stderr, "samaya: cannot read start '%s'\n", start_path.c_str());
+      return kExitReadError;
+    }
+    if (params.log_level > 0) {
+      std::printf("MIP start: %d of %d columns from %s\n", matched, model.num_cols(),
+                  start_path.c_str());
+    }
   }
 
   samaya::Result result;
